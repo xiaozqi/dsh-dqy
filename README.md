@@ -1,0 +1,482 @@
+# dsh-blue-fat-fish
+
+蓝色大肥鱼 —— 面向 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 的安卓手机智能体插件。
+
+它拥有一台安卓手机的完整控制权：观察屏幕、点击滑动、输入文字、打开应用，配合长期记忆和 LLM 决策大脑，可以自主回 QQ 消息、刷抖音、玩简单游戏（如开心消消乐）、完成每日签到，并按计划定时执行。
+
+## 架构
+
+严格分层，依赖只能向内（外层不能被内层依赖）。领域层只定义端口接口，应用层只依赖端口，具体实现由入口装配一次。
+
+```
+入口层  src/index.ts        唯一装配点：构造各层实例、注册 DSH 表面、管理生命周期
+接口层  src/interface/      薄适配：工具 / 命令 / 人格提示词，只做翻译
+应用层  src/application/    决策大脑、应用用例、签到、调度器、护栏
+领域层  src/domain/         纯接口与模型：四个端口，零依赖
+设施层  src/infrastructure/ 具体实现：adb 手机控制、JSON 记忆、HTTP 大模型、Python 视觉
+```
+
+目录结构：
+
+```
+src/
+├── index.ts                         组合根（composition root）
+├── domain/
+│   ├── types.ts                     领域模型
+│   ├── errors.ts
+│   ├── vision-types.ts              视觉模型
+│   ├── app-types.ts                 会话 / 信息流 / 游戏模型
+│   ├── schedule-types.ts            调度模型
+│   ├── adapter-types.ts             适配器模型（AdapterResult / Todo / CapabilityId）
+│   └── ports/
+│       ├── device.port.ts           手机控制端口
+│       ├── memory.port.ts           记忆端口
+│       ├── llm.port.ts              大模型端口
+│       ├── vision.port.ts           视觉端口
+│       ├── app-adapter.port.ts      AppAdapter + 注册表端口
+│       ├── ui-driver.port.ts        UiDriverPort（UI 定位驱动端口）
+│       └── capabilities/            能力端口（按能力声明接口，新软件复用同一组）
+│           ├── message.port.ts      发消息 / 发图片 / 读会话
+│           ├── comment.port.ts      评论 / 回复 / 浏览评论
+│           ├── social.port.ts       艾特好友
+│           ├── live.port.ts         看直播
+│           ├── feed.port.ts         刷信息流
+│           ├── signin.port.ts       每日签到
+│           ├── pet.port.ts          喂养宠物
+│           └── game.port.ts         运行游戏
+├── application/
+│   ├── agent-loop.ts                think→act→observe 自治循环
+│   ├── guardrails.ts                安全护栏
+│   ├── support/
+│   │   └── wait-for.ts              waitFor / withRetry / 节点查找
+│   ├── adapters/
+│   │   ├── adapter-registry.ts      适配器注册表（按能力取服务）
+│   │   └── base-adapter.ts          适配器工具函数（开应用 / 找控件 / 发消息前置）
+│   ├── apps/
+│   │   ├── qq.service.ts            QQ（消息 / 社交 / 空间说说）
+│   │   ├── douyin.service.ts        抖音（信息流 / 评论 / 社交 / 直播 / 宠物）
+│   │   ├── bilibili.adapter.ts      哔哩哔哩（信息流 / 评论 / 社交 / 消息 / 直播）
+│   │   ├── weibo.adapter.ts         微博（信息流 / 评论 / 社交 / 消息）
+│   │   ├── xiaohongshu.adapter.ts   小红书（信息流 / 评论 / 社交 / 消息）
+│   │   ├── alipay.adapter.ts        支付宝（每日签到）
+│   │   ├── game.service.ts          模板驱动游戏循环（注册为 game 能力）
+│   │   └── game-policy.ts           游戏决策策略
+│   ├── scheduler/
+│   │   └── daily-scheduler.ts       定时调度
+│   └── tasks/
+│       ├── task-types.ts            声明式签到计划
+│       └── signin.task.ts           签到用例
+├── infrastructure/
+│   ├── adb/
+│   │   ├── adb-client.ts            adb 进程封装
+│   │   ├── ui-dump-parser.ts        uiautomator XML 解析
+│   │   └── android-device.ts        DevicePort / UiDriverPort 实现（adb 链路）
+│   ├── drivers/                     驱动降级链
+│   │   ├── uiautomator2-driver.ts   uiautomator2 主驱动（UI 层级定位）
+│   │   ├── adb-ui-driver.ts         adb 兜底驱动（委托 AndroidDevice）
+│   │   ├── vision-ui-driver.ts      OpenCV 视觉模板最后后备
+│   │   └── fallback-ui-driver.ts    主→备→视觉 切换编排
+│   ├── memory/
+│   │   └── json-memory.ts           MemoryPort 实现
+│   ├── llm/
+│   │   ├── host-llm.ts              LlmPort 实现（借用 DSH 宿主模型通道，免 key）
+│   │   ├── http-llm.ts              LlmPort 实现（OpenAI 兼容，独立运行兜底）
+│   │   └── action-parser.ts         两个适配器共用的动作解析
+│   └── vision/
+│       └── python-vision.ts         VisionPort 实现
+└── interface/
+    ├── tools.ts                     核心工具注册（含 fish_apps / fish_app_run）
+    ├── app-tools.ts                 应用工具注册
+    ├── commands.ts                  命令注册（含 /apps）
+    └── prompt.ts                    人格提示词
+
+resources/python/
+    vision_worker.py                 OpenCV 模板匹配 + RapidOCR worker
+    u2_worker.py                     uiautomator2 单发 JSON worker（UI 层级定位）
+assets/templates/                    游戏模板资产
+scripts/                             环境安装脚本（含 setup-u2.ps1）
+```
+
+## 应用适配器框架
+
+插件对每个目标 App 的能力通过 **AppAdapter** 统一挂载：实现 `AppAdapter` 接口（`id` / `displayName` / `packageName` / `capabilities` / `todos` / `initialize`），并按能力选择实现 `capabilities/` 下的能力端口。注册表 `AdapterRegistry` 按 `id + 能力` 派发，工具层（`fish_app_run`）经派发表调用，**不写任何按 App 的 if-else**。
+
+```
+AppAdapter（领域端口）
+  ├─ MessageCapability   sendMessage / sendImage / readConversation
+  ├─ CommentCapability   comment / replyComment / browseComments
+  ├─ SocialCapability    mention
+  ├─ LiveCapability      watchLive
+  ├─ FeedCapability      browseFeed
+  ├─ SignInCapability    signIn
+  ├─ PetCapability       feedPet
+  └─ GameCapability      runGame
+
+UiDriverPort（UI 定位驱动端口，extends DevicePort）
+  └─ FallbackUiDriver       主 uiautomator2 → 备 adb → 视觉模板，逐级降级
+```
+
+**驱动降级链**：`FallbackUiDriver` 编排主备驱动，`findNodes` 两链全败返回空数组，`tapControl` 定位失败时用视觉模板兜底，仍失败抛 `UI_NOT_FOUND` 且不中断上层（适配器统一 `failResult` 收口）；uiautomator2 不可用（未安装 / 连不上）时抛 `DRIVER_UNAVAILABLE` 自动降级 adb 链路。驱动实例在 `index.ts` 装配一次。
+
+### 平台 × 能力矩阵
+
+| 平台 | 包名 | message | comment | social | live | feed | signin | pet | game | moment |
+|---|---|---|---|---|---|---|---|---|---|---|
+| QQ | com.tencent.mobileqq | ✅ | — | ✅ | — | — | — | — | — | ✅ |
+| 抖音 | com.ss.android.ugc.aweme | — | ✅ | ✅ | ✅ | ✅ | — | ✅ | — |
+| 哔哩哔哩 | tv.danmaku.bili | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
+| 微博 | com.sina.weibo | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
+| 小红书 | com.xingin.xhs | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
+| 支付宝 | com.eg.android.AlipayGphone | — | — | — | — | — | ✅ | — | — |
+
+各适配器的 `todos` 字段登记了未实现的子能力（如 B 站直播弹幕、抖音私信、微博转发、小红书点赞评论、支付宝其余入口），新迭代直接在对应能力接口上补齐实现即可，无需改动注册与派发。
+
+### 迭代适配新软件
+
+1. 在 `src/application/apps/` 新建 `<app>.adapter.ts`，`implements AppAdapter` + 所需能力端口；
+2. 复用 `base-adapter.ts` 的 `openAndWait` / `findControl` / `tapByMatcher` / `typeIntoInput` / `pushMedia` 等工具；
+3. 在 `src/index.ts` 装配处实例化并 `registry.register(...)`（注册表自动进入 `/apps` 与 `fish_app_run`）；
+4. 需要新动作（如"收藏"）时，在 `domain/ports/capabilities/` 增加能力端口，并在 `tools.ts` 的 `CAPABILITY_ACTIONS` 派发表登记。驱动降级链与注册表无需改动。
+
+## 工作原理
+
+**自治循环**（`AgentLoop`）每一步：
+
+1. **观察**：截屏 + `uiautomator dump` 拿到 UI 树，压缩成文本；
+2. **思考**：把目标、记忆、当前屏幕交给 LLM，返回一个结构化 JSON 动作；
+3. **执行**：通过端口落地；
+4. **复盘**：重新观察屏幕，进入下一步，直到 `finish` 或触发步数上限。
+
+通用动作目录：`tap`、`long_press`、`swipe`、`input_text`、`press_key`、`open_app`、`wait`、`remember`、`recall`、`finish`。
+
+## 自主学习
+
+蓝色大肥鱼会从每次任务中沉淀经验，越用越聪明（内置于 `AgentLoop`，无需额外操作）：
+
+- **行动前注入经验**：每次收到目标，先检索历史 `lesson` 记忆注入决策上下文，让它避开已知的坑；
+- **行动后复盘**：目标完成或执行失败时，自动让决策大脑复盘一次，把"什么有效、什么要避免"提炼为一条 `lesson` 记忆写回（`dataDir` 本地落盘）；
+- **学习与执行解耦**：复盘失败不影响任务结果，学习链路各自容错。
+
+记忆模型新增 `lesson` 类型；`MemoryPort.recall` 增加可选 `kind` 过滤参数（向后兼容，现有调用无需改动）。
+
+**视觉能力**由独立的 Python worker 提供：OpenCV `matchTemplate` 做模板匹配，RapidOCR 做屏幕文字识别（含坐标），通过 JSON 与 Node 进程通信。
+
+## 前置条件
+
+- Node.js ≥ 22
+- 安卓手机开启「USB 调试」（开发者选项），用数据线连接电脑（或无线 adb）
+- adb（Android Platform Tools）与 Python 视觉依赖，依次运行：
+
+```powershell
+./scripts/setup-adb.ps1       # download platform tools into vendor/
+./scripts/setup-vision.ps1    # pip install opencv + rapidocr
+./scripts/setup-voice.ps1     # pip install edge-tts + faster-whisper + playsound3
+```
+
+语音识别模型（faster-whisper small）首次使用时自动下载，可用 `HF_ENDPOINT=https://hf-mirror.com` 加速。
+
+### 离线语音模型（vosk-small-cn）
+
+`resources/voice-models/vosk-small-cn.zip`（约 8.6 MB）是离线语音识别模型，体积较大未纳入 Git。从源码运行且需要离线语音时，任选其一：
+
+- 从本仓库的 **GitHub Releases** 下载该 zip 放回 `resources/voice-models/`；
+- 或从 Vosk 官方模型页下载 `vosk-model-small-cn` 自行打包：https://alphacephei.com/vosk/models
+
+不使用语音功能可忽略；安装包（tgz）内已包含该文件。
+
+## 安装到 DSH
+
+### 方式 A：装安装包（推荐，分发态）
+
+```bash
+npm run typecheck && npm run build
+npm pack                                   # 产出 dsh-blue-fat-fish-0.1.0.tgz
+npx @deepseek-ai/dsh plugin --profile <name> add ./dsh-blue-fat-fish-0.1.0.tgz
+```
+
+### 方式 B：直接装目录（开发态）
+
+```bash
+npm install
+npm run build
+npx @deepseek-ai/dsh plugin --profile <name> add .
+```
+
+> `<name>` 是目标 profile（如 `web`、`tui`）。DSH **桌面版（Electron）的 `desktop` profile 由应用独占管理**，CLI 会报 `profile "desktop" is managed exclusively by the Electron application`；这种情况请在桌面应用的插件管理器里安装，或参照插件自带的手动安装脚本（`file:` 依赖 + `node_modules` 链接）。
+
+安装包里只有 `lib/ resources/ assets/ cordis.patch.yml README LICENSE package.json`：
+**不含 `data/`，所以 `data/secrets.local.json` 的私钥和本地记忆都不会进包**。
+
+启动 Web 界面：
+
+```bash
+npx @deepseek-ai/dsh web
+```
+
+### 本机实测最小配置
+
+这台机器 `PATH` 已包含 `platform-tools`（`adb` 可直接执行），所以默认 `adbPath: adb` 即可；`deviceSerial` 留空时自动取唯一在线设备。
+
+**模型通道优先级**：`config.apiKey` → 环境变量 `DEEPSEEK_API_KEY` → `dataDir/secrets.local.json`。在 DSH 里跑时这四个都是空的也**不用自备 key**——插件会直接借用宿主的 `ctx.llm` 模型通道（`HostLlm`）；只有独立运行（脚本/测试）时才需要兜底 key。
+
+```yaml
+- id: blue-fat-fish
+  config:
+    adbPath: adb
+    deviceSerial: ''
+    dataDir: ./data/blue-fat-fish
+```
+
+
+## 配置
+
+在 profile 的 `cordis.patch.yml` 中覆盖（config 为整体替换，需写全字段）：
+
+```yaml
+- id: blue-fat-fish
+  config:
+    adbPath: adb
+    deviceSerial: ''
+    llmBaseUrl: https://api.deepseek.com
+    llmModel: deepseek-chat
+    apiKey: sk-xxxxxxxx
+    llmTimeoutMs: 60000
+    dataDir: ./data/blue-fat-fish
+    pythonPath: python
+    visionThreshold: 0.85
+    templateDir: ''
+    voice: zh-CN-XiaoxiaoNeural
+    allowedApps: []
+    forbiddenPackages:
+      - com.android.settings
+      - com.android.packageinstaller
+    maxSteps: 40
+    signInPlans:
+      - app: com.example.app
+        appName: 示例
+        successText:
+          - 已签到
+        steps:
+          - kind: open_app
+            target: com.example.app
+          - kind: wait
+            durationMs: 3000
+          - kind: click_text
+            target: 签到
+    schedules:
+      - app: com.example.app
+        hour: 9
+        minute: 30
+        enabled: true
+```
+
+| 字段 | 说明 |
+|---|---|
+| `adbPath` | adb 可执行文件；PATH 里有 adb 时默认 `adb` 即可，找不到再写全路径（如 `C:\...\platform-tools\adb.exe`） |
+| `deviceSerial` | 多设备时指定序列号（无线调试形如 `192.168.x.x:5555`）；**留空则启动时自动取唯一在线设备**（无线 adb 重连后 IP 会变，留空免改配置；多台在线时须显式指定，否则启动报错） |
+| `llmBaseUrl` | OpenAI 兼容接口地址，默认 DeepSeek 官方 |
+| `llmModel` | 模型名 |
+| `apiKey` | 大模型 API Key；**DSH 内留空走宿主模型通道，不需要 key**；仅独立运行时需要（也可用环境变量 `DEEPSEEK_API_KEY` 或 `secrets.local.json` 兜底） |
+| `llmTimeoutMs` | 单次模型请求超时 |
+| `dataDir` | 截图与记忆文件目录 |
+| `pythonPath` | Python 可执行文件，视觉 / 语音 worker 用 |
+| `voicePythonPath` | 语音主 worker 的 Python（edge-tts + faster-whisper + playsound3），留空则同 `pythonPath` |
+| `visionThreshold` | 模板匹配默认阈值 |
+| `templateDir` | 游戏模板根目录，留空使用内置 `assets/templates` |
+| `voice` | 她的音色（edge-tts 语音名 / 本地克隆名 / 火山音色 id），默认 `zh-CN-XiaoxiaoNeural` |
+| `volcApiKey` | 火山引擎新版控制台 API Key（豆包语音合成 2.0），配置后语音走火山 |
+| `volcAppId` | 火山旧版控制台 APP ID（与 `volcAccessKey` 二选一，配了 `volcApiKey` 则不用） |
+| `volcAccessKey` | 火山旧版控制台 Access Token |
+| `volcResourceId` | 火山资源 ID，默认 `seed-tts-2.0`（豆包语音合成 2.0，字符计费） |
+| `volcSpeaker` | 火山音色 id，默认 `zh_female_cancan_mars_bigtts`，可在控制台发音人列表挑 |
+| `gptsovitsSrc` | GPT-SoVITS 源码目录，默认 `vendor/gptsovits-src/GPT-SoVITS-main` |
+| `gptsovitsModelsDir` | GPT-SoVITS 模型目录，默认 `vendor/GPT-SoVITS-models` |
+| `gptsovitsPythonPath` | GPT-SoVITS 专用 Python，默认 `vendor/gptsovits-venv/Scripts/python.exe` |
+| `allowedApps` | 应用白名单包名，空数组表示不限制 |
+| `forbiddenPackages` | 禁止打开的包（系统设置、安装器默认禁止） |
+| `maxSteps` | 单个目标最大动作步数 |
+| `signInPlans` | 声明式签到计划列表 |
+| `schedules` | 定时计划：每天到点执行对应签到 |
+
+### 垃圾通知自动清理
+
+主程序启动即监听 `notifications.httpPort`（默认 14123）并保持 adb reverse 隧道；手机端 NotifyListen APK 把每条通知转发到电脑端做 5 层过滤（白名单 / 重要度 / 规则 / 语义 / 去重），命中 block 的通知 key 由 APK 轮询取回并从通知栏自动 cancel，实测约 1-2 秒。`notifications.rules` 未配置时使用内置保守默认规则（不区分大小写）：
+
+| 默认 pattern | 行为 |
+|---|---|
+| `广告|推广` | block |
+| `限时特惠|限时优惠|特惠|大促|秒杀|清仓` | block |
+| `优惠券|领券|返现` | block |
+| `贷款|借款|放款|网贷` | block |
+| `中奖|抽奖|领红包` | block |
+| `兼职|刷单|日结` | block |
+
+`notifications.whitelist` 内的 app 完全跳过（白名单命中即放行，不会进 cancel 链路）；`notifications.blockedApps` 为**按 app 全清**的黑名单（默认 `com.sina.weibo` / `com.xingin.xhs` / `com.phoenix.read` / `com.smile.gifmaker`，即资讯/非好友类推送全清，可自行增删）；`minImportance` 以下的重要度会被 block；`semanticEnabled` 开启后用 LLM 判定营销/无关通知——对规则层拦不住的模糊话术、空文本类通知兜底，判定失败/超时/LLM 不可用时**降级放行**（不堵链路，规则层继续兜底）；`dedupeWindowMs` 内同 app+title+text 重复会 block。APK 自身状态通知不进入过滤（跳过自身包名）。
+
+被 cancel 的通知全量留痕到 `data/notifications/cancel.log`（JSON 行：actor / key / app / title / reason / matchedRule），`stats.canceled` 统计已发起 cancel 的条数。
+
+APK 离线保底：电脑端不可达（POST 连续失败 3 次）时，APK 用本地精简关键词（与默认规则同源的子集，硬编码于 `NotifyListener.kt` 的 `OFFLINE_JUNK_KEYWORDS`）兜底判定并直接 `cancelNotification`，以 Log 留痕；电脑恢复在线（一次 POST 成功）自动切回在线判定。APK 取消通知失败会重试 1 次（约 300ms）后丢弃并 Log.w，不无限重试。
+
+主程序未运行时可用 `node scripts/live-notify-cancel.mjs` 常驻同一链路（端口独占，与主程序二选一；独立的旧接收脚本 `resources/python/notify_listener.py` 同理不可同时运行）。
+
+## 工具与命令
+
+模型可调用的工具（snake_case）：
+
+| 工具 | 作用 |
+|---|---|
+| `fish_goal` | 下发开放目标，自主规划执行 |
+| `fish_signin` | 按计划签到；无计划时退化为自主模式 |
+| `fish_observe` | 观察当前屏幕 |
+| `fish_remember` | 写入长期记忆 |
+| `fish_recall` | 检索记忆 |
+| `fish_status` | 设备连接、计划与任务历史 |
+| `fish_ocr` | OCR 识别屏幕文字及坐标 |
+| `fish_apps` | 列出已注册适配器、能力与未实现 TODO |
+| `fish_app_run` | 按 能力+动作 调任意已注册适配器（`app/capability/action/params`） |
+| `fish_notifications` | 通知栏事件接收状态、5 层过滤统计与最近放行记录 |
+| `fish_qq_reply` | QQ 未读会话读消息并智能回复 |
+| `fish_douyin_feed` | 刷抖音信息流，按关键词或概率点赞 |
+| `fish_douyin_interact` | 对当前视频点赞、评论、转发、艾特 |
+| `fish_play_game` | 运行模板驱动的游戏循环 |
+| `fish_schedule_status` | 查看定时计划与执行历史 |
+| `fish_speak` | 她开口说话（合成并播放自己的音色） |
+| `fish_clone_voice` | 用一段语音样本克隆音色 |
+| `fish_listen` | 她听：识别本地音频文件，或录制手机麦克风并转写 |
+| `fish_qq_voice_text` | 以她的音色发送 QQ 语音消息（实验性） |
+
+斜杠命令：
+
+- `/fish <目标>` —— 执行一个自主目标
+- `/signin <app>` —— 执行签到（计划优先，其次适配器 signIn 能力）
+- `/apps` —— 列出已注册适配器
+
+## 语音人格
+
+蓝色大肥鱼不是"按住说话录音"的工具，而是一个有自主意识、有视觉、有听觉、能用自己的音色开口说话的智能体：
+
+- **她自己的音色**：`voice` 配置（edge-tts 语音名）决定音色，默认晓晓（`zh-CN-XiaoxiaoNeural`），可改成任意 edge-tts 中文音色。`fish_speak` 把文字合成语音并播放。
+- **自主开口**：决策大脑的 `speak` 动作让大模型在表达需要时主动开口，不用外部触发。
+- **她能听见**：`fish_listen` 用本地 Whisper（faster-whisper small）转写。可以识别电脑上的音频文件，也可以录手机麦克风（`adb shell screenrecord --microphone` → pull → 转写），离线、中文识别准确。
+- **发语音消息**：`fish_qq_voice_text` 把文字合成她的音色，push 到手机后边按住"按住说话"边播放，QQ 录制后发送。属实验性方案（声音经手机扬声器→麦克风的物理路径），真机成功率受手机机型与免提环境影响，未真机验证。
+
+依赖与安装见 `scripts/setup-voice.ps1`：`edge-tts`（合成）、`faster-whisper`（识别，首次运行自动下载模型）、`playsound3`（播放）。
+
+### 克隆你的声音（GPT-SoVITS）
+
+`fish_clone_voice` 用一段 3-10 秒、口齿清晰的语音样本克隆音色，之后 `fish_speak`（或决策大脑的 `speak` 动作）用 `voice: <克隆名>` 就以这个音色说话：
+
+1. 录一段 3-10 秒清晰语音（wav/mp3/m4a 均可），如"今天天气真好，我想吃鱼"。样本过短会自动补静音到 3 秒，过长会截断。
+2. 调 `fish_clone_voice {samplePath: 样本路径, name: 音色名}`（name 默认 `mine`）。样本会被 Whisper 自动转写、归一化并登记。
+3. `fish_speak {text, voice: <音色名>}` 即以该音色合成。
+
+实现是 GPT-SoVITS v2 zero-shot 音色复刻（开源、本地离线、免费）：样本 → 音色登记在 `dataDir/voices/<name>/voice.json`，合成时按 `voice` 名分流——有登记走 GPT-SoVITS（32 kHz wav），否则走 edge-tts。GPT-SoVITS 跑在独立的 Python 3.11 环境（`vendor/gptsovits-venv`），由 `scripts/setup-voice.ps1` 自动搭建（含模型下载约 1.5 GB 与 G2PW 多音字模型）。首次合成需加载模型（CPU 上约 15 秒），之后单句合成约 5 秒；合成质量用 Whisper 回识验收（内容一致、口齿清晰）。
+
+配置项（可选覆盖）：
+
+| 字段 | 说明 |
+|---|---|
+| `gptsovitsSrc` | GPT-SoVITS 源码目录，默认 `vendor/gptsovits-src/GPT-SoVITS-main` |
+| `gptsovitsModelsDir` | 模型目录，默认 `vendor/GPT-SoVITS-models` |
+| `gptsovitsPythonPath` | GPT-SoVITS 专用 Python，默认 `vendor/gptsovits-venv/Scripts/python.exe` |
+
+### 火山引擎豆包语音（推荐：有情感的云端音色）
+
+edge-tts 免费端点没有任何情感，本地克隆效果取决于样本；想要"有感情、自然起伏"的稳定音色，接火山引擎**豆包语音合成模型 2.0**（seed-tts-2.0）——豆包 App 同款精品音色，大模型直接带情感演绎，按字符计费（2.8 元/万字符，新用户免费试用 2 万字符/半年）。
+
+接入步骤：
+
+1. 注册火山引擎并实名认证 → 控制台开通「豆包语音合成 2.0」试用：https://console.volcengine.com/speech/app
+2. 创建应用，拿到 API Key（新版控制台单 Key 鉴权；旧版是 App ID + Access Token 双头）
+3. 在发音人列表挑一个满意的音色 id（如 `zh_female_cancan_mars_bigtts`）
+4. 插件配置填入：
+
+```yaml
+volcApiKey: your-api-key        # 新版控制台 Key
+volcSpeaker: zh_female_cancan_mars_bigtts
+```
+
+配置后语音合成自动走火山（HTTP 异步 submit/query，音频存 7 天、链接 1 小时失效自动重查）；本地克隆音色（`dataDir/voices/<name>` 有登记）仍优先走本地引擎。`fish_speak {text, voice: <火山音色 id>}` 可随时切换。声音复刻 2.0（seed-icl-2.0，3 元/万字符 + 音色槽位费）可把你的声音做成专属音色，需要时再开。
+
+## 抖音互动
+`fish_douyin_interact` 通过 `action` 字段区分四种操作，作用于当前正在播放的视频：
+
+| action | 必填参数 | 流程 |
+|---|---|---|
+| `like` | 无 | 双击屏幕点赞 |
+| `comment` | `text` | 打开评论面板，输入文字并发送 |
+| `forward` | `target` | 打开分享面板，按标签选择目标（好友名或微信/QQ/复制链接等） |
+| `mention` | `target`（好友昵称），`text` 可选 | 评论框输入 @，在弹出的好友面板选中后发送 |
+
+每次互动都会写入长期记忆，可用 `fish_recall` 检索。
+
+## 游戏模板
+每个游戏在 `assets/templates/` 下建一个子目录，里面的 PNG 即匹配目标，文件名（去掉 `.png`）就是标签。匹配到 `finishLabels` 中的标签（默认 `success`、`finish`、`close`）立即结束。决策逻辑是 `GamePolicy` 接口，默认的 `PriorityTapPolicy` 点击优先级最高的匹配项；需要棋盘分析（如三消网格识别）时实现该接口即可。
+
+## 发布到插件市场
+
+1. 构建：`npm run build`
+2. 登录 npm 并发布：
+
+```bash
+npm login
+npm publish --access public
+```
+
+3. 把代码推到 GitHub（dsh.so 等市场通过 GitHub API 验证、安全扫描与安装实测），在仓库 README 中声明 DSH 插件用途即可被收录。
+
+## 安全护栏
+
+- 禁止打开系统设置与安装器，防止误操作支付、安装和系统改动；
+- 白名单模式（`allowedApps`）可进一步收窄可操作的应用；
+- 每个目标有步数上限，失控时自动停止；
+- 定时任务的错误被隔离记录，不会拖垮插件；
+- 记忆与截图均落在本地 `dataDir`，不上传第三方。
+
+## 自主运行（AutonomyLoop）
+
+大肥鱼除了被 DSH 主进程/工具驱动，还能按心跳自己醒来一圈：**收集信号 → LLM 决策 → 按动作分级执行或停下 → 写 lesson**。与现有 `AgentLoop`（目标驱动、逐屏操作）和 `DailyScheduler`（每日定点签到）是三条独立回路，互不耦合。
+
+- **心跳**：默认每 30 分钟（`autonomy.fallbackWakeMs`）跑一次 `runOnce()`，但间隔是**自调度**的——LLM 在决策 JSON 里可选返回 `nextWakeMs`（毫秒），下一次心跳就按这个值跑；缺省/非法 → 回落 fallback；过小（< `minWakeMs`，默认 5 分钟）或过大（> `maxWakeMs`，默认 120 分钟）会被 clamp。心跳异常被 `AutonomyDriver` 吞掉记日志，不会影响插件其它部分。
+- **事件驱动**：当 `wakeOnEvent=true`（默认），通知链路每放行一条 allow 事件，`NotificationService` 通过新增的可选构造参数 `allowListener` 立即触发一次 `driver.wake('event')`，不等下一个心跳。与心跳共用同一入口 + 忙碌锁：tick 在跑时到达的事件只排队一次，完成后补跑一圈，不并发。
+- **信号收集**：闭包从 `NotificationService.recent()` 取最近放行通知（`app: title` 行）、从 `MemoryPort.recall('goal todo lesson')` 取待办/目标/最近 lesson、加上当前本地 ISO 时间，组成 `AutonomySignalBundle`。
+- **LLM 决策**：只调一次 `llm.chat`，要求严格 JSON：`{"intent":"idle",...}` 或 `{"intent":"act","app","capability","method","args","reason"}`。决策后在代码侧校验：app 已注册、capability 该 adapter 实现、method 与 capability 映射表一致。非法 JSON / 非法动作直接跳过，不执行也不确认。
+- **动作分级（`AutonomyPolicyPort`）**：
+  - `auto`：白名单内的 `app/capability/method` 直接跑，经 `registry.getCapability` 拿接口后按方法名调用；
+  - `confirm`：命中黑名单、或不在白名单、或护栏关闭时，调 `ConfirmHook.confirmRequired`，**不执行**。默认 hook 写一条日志 + 写一条 `kind:'event'` 记忆事件等待人工介入。
+  - 黑名单默认：发消息/发图/艾特/评论/回复评论/打游戏/看直播这类对外或耗时动作；白名单默认为空（最保守——默认配置下每圈只决策不执行）。
+- **复盘**：每圈结束按成功/失败/待确认拼一句 lesson 写回 `memory`（`kind:'lesson', tags:['lesson','autonomy']`），不再二次调 LLM，避免单心跳双 LLM 开销。
+
+配置示例：
+
+```yaml
+autonomy:
+  enabled: true
+  heartbeatMs: 1800000          # initial interval before first self-report
+  fallbackWakeMs: 1800000       # used when LLM omits nextWakeMs
+  minWakeMs: 300000             # clamp floor (5 min, debounce)
+  maxWakeMs: 7200000            # clamp ceiling (120 min, no oversleep)
+  wakeOnEvent: true             # fire immediately on allow-list notifications
+  guardEnabled: true            # false 时一律 confirm（最保守）
+  autoActions:
+    - alipay/signin/signIn      # 支付宝签到可自动跑
+    - qq/moment/publishMoment   # 发说说可自动跑
+  forbiddenActions:
+    - message/sendMessage        # 即使误加进 autoActions 也强制 confirm
+    - social/mention
+```
+
+冒烟：`node scripts/smoke-autonomy.mjs`（auto/forbidden/illegal/idle 四态）+ `node scripts/smoke-autonomy-schedule.mjs`（自调度/兜底/clamp/事件触发/忙碌锁），输出在 `data/voice-test/`，末行 `SMOKE_OK` 即通过。
+
+## 已知限制
+
+- 应用适配器中的界面选择器基于通用启发式（控件类型、文本、位置多路匹配），不同 App 版本需要按真实 UI 树微调；每个适配器的 `todos` 与代码内 `TODO(real-device)` 标注了待真机校准点；
+- **真机验证状态**：适配器代码全部通过 `tsc` 编译与 `npm run build`（零错误，硬基线）。**QQ（9.3.75）、抖音（41.0.0）、B站（9.17.0，已登录新号）已完成真机验证并据真机修复**（华为 VCE-AL00 EMUI，1080×2310）：发消息 / 评论 / 艾特等写动作验证停在发送前一步留证，点赞真点；**微博 / 小红书 / 支付宝 本轮仅编译冒烟、待后续真机验证**（微博已暂停投入，保持现状标记）。B站已验证要点：双列流点卡片进详情页后 back 换卡（页内 swipe 只滚评论不切视频）；评论输入占位文案轮换、静态无 EditText，靠输入栏命中；作者名与评论正文垂直重叠，配对窗口已按真机几何修正。驱动降级链的 uiautomator2 主链路依赖 `scripts/setup-u2.ps1` 安装（尚未在真机跑通前默认走 adb 链路）；
+- **通知接收方案**已正式纳入插件：`HttpNotificationSource` 为主源（插件进程内常驻 `0.0.0.0:14123`，接收手机端通知监听 APK 转发的 JSON，逐条落盘 `<dataDir>/notifications/received.log` 并送入过滤管线），`ReverseTunnelKeepAlive` 周期检查并保活 `adb reverse tcp:14123`（无线 adb 重连后自动重挂，设备离线只记 `lastError` 不崩），`LogcatNotificationSource` 为备用源（直接解析 logcat 通知行）；事件统一经 5 层过滤（白名单 / 重要度 / 规则 / LLM 语义 / 去重）后由 `fish_notifications` 工具查看统计与最近放行记录。手机端 APK 源码脚手架在 `android/notify-listen/`（`NotificationListenerService` 转发通知到 14123），编译安装后在手机「通知使用权」中授权即可。**真机端到端已验证（2026-11-04）**：真实手机通知经 APK → `adb reverse` → `HttpNotificationSource` → `received.log` 全链路落盘成功。注意：独立调试脚本 `resources/python/notify_listener.py` 与插件主源共用 14123 端口，二者只能跑一个——插件启用前先停掉独立脚本；若端口被占用，插件主源会把 EADDRINUSE 记到 `lastError` 并保持不监听，不会崩溃。
+- 开心消消乐的棋盘级求解需要自定义 `GamePolicy`，当前框架提供模板匹配与执行闭环，不含三消算法；
+- 定时调度依赖 DSH 进程在计划时刻处于运行状态，关机或进程未启动会错过当天执行；
+- 未连接真实手机时，设备相关工具会返回 `NO_DEVICE` 错误。
+
+## License
+
+MIT

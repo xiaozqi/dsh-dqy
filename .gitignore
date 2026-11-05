@@ -1,0 +1,24 @@
+# Dependencies and build output
+node_modules/
+lib/
+*.log
+
+# Local runtime data (secrets, memory, screenshots, one-off scripts)
+data/
+
+# Vendored binaries and local python virtual environments
+vendor/
+
+# Packed release artifacts
+*.tgz
+
+# OS files
+.DS_Store
+
+# Android notify-listen: machine-local SDK config and Gradle build output
+android/notify-listen/.gradle/
+android/notify-listen/app/build/
+android/notify-listen/local.properties
+
+# Large offline voice model; download separately (see README)
+resources/voice-models/vosk-small-cn.zip
