@@ -38,14 +38,14 @@
     "automation",
     "adb"
   ],
-  "author": "xzq134509",
+  "author": "xiaozqi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xzq134509/dsh-blue-fat-fish.git"
+    "url": "git+https://github.com/xiaozqi/dsh-blue-fat-fish.git"
   },
-  "homepage": "https://github.com/xzq134509/dsh-blue-fat-fish#readme",
+  "homepage": "https://github.com/xiaozqi/dsh-blue-fat-fish#readme",
   "bugs": {
-    "url": "https://github.com/xzq134509/dsh-blue-fat-fish/issues"
+    "url": "https://github.com/xiaozqi/dsh-blue-fat-fish/issues"
   },
   "license": "MIT",
   "engines": {
