@@ -98,7 +98,13 @@ export class LogcatNotificationSource implements NotificationSource {
     const args = this.serial
       ? ['-s', this.serial, 'logcat', '-v', 'time']
       : ['logcat', '-v', 'time']
-    const child = spawn(this.adbPath, args, { windowsHide: true })
+    // stderr must never be an unread pipe: adb errors ("device offline",
+    // repeated daemon messages) would fill it, block the child forever, while
+    // `connected` still reported true.
+    const child = spawn(this.adbPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }) as unknown as NonNullable<typeof this.child>
     this.child = child
     this.connectedFlag = true
     this.stdoutBuffer = ''
@@ -118,6 +124,12 @@ export class LogcatNotificationSource implements NotificationSource {
       child.kill()
     })
     child.on('close', () => {
+      // A restart can replace the handle before the old child closes; never
+      // null the *new* handle — doing so orphaned a live logcat that could no
+      // longer be killed for the rest of the process lifetime.
+      if (this.child !== child) {
+        return
+      }
       this.child = null
       this.connectedFlag = false
       if (this.startedFlag) {

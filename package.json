@@ -1,7 +1,7 @@
 {
-  "name": "dsh-blue-fat-fish",
-  "version": "0.1.0",
-  "description": "Blue Fat Fish - autonomous Android agent plugin for DeepSeek Harness",
+  "name": "dsh-dqy",
+  "version": "0.3.0",
+  "description": "DQY - autonomous Android agent plugin for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -23,7 +23,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test:smoke": "npm run build && node --test tests/smoke.mjs",
+    "test": "node --test tests/smoke.mjs tests/safety.mjs",
+    "test:smoke": "npm run build && node --test tests/smoke.mjs tests/safety.mjs",
     "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\""
   },
   "dsh": {
@@ -42,11 +43,11 @@
   "author": "xiaozqi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiaozqi/dsh-blue-fat-fish.git"
+    "url": "git+https://github.com/xiaozqi/dsh-dqy.git"
   },
-  "homepage": "https://github.com/xiaozqi/dsh-blue-fat-fish#readme",
+  "homepage": "https://github.com/xiaozqi/dsh-dqy#readme",
   "bugs": {
-    "url": "https://github.com/xiaozqi/dsh-blue-fat-fish/issues"
+    "url": "https://github.com/xiaozqi/dsh-dqy/issues"
   },
   "license": "MIT",
   "engines": {

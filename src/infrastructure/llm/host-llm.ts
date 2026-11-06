@@ -38,14 +38,14 @@ function buildMessage(
   const text = [{ type: 'text' as const, text: message.content }]
   if (message.role === 'assistant') {
     return {
-      id: `bff-${Date.now()}-${seq}`,
+      id: `dqy-${Date.now()}-${seq}`,
       role: 'assistant',
       content: text,
       source: { kind: 'model', provider: route.provider, model: route.model },
     }
   }
   return {
-    id: `bff-${Date.now()}-${seq}`,
+    id: `dqy-${Date.now()}-${seq}`,
     role: 'user',
     content: text,
     source: { kind: 'user' },

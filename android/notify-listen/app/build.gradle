@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.bff.notify'
+    namespace 'com.dqy.notify'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.bff.notify"
+        applicationId "com.dqy.notify"
         minSdk 26
         targetSdk 34
         versionCode 1

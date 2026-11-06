@@ -2,6 +2,12 @@ import type {
   GateDecision,
   OutboundMessage,
 } from '../../domain/control-types.js'
+import type {
+  PolicyDecision,
+  PolicyOptions,
+  PolicyRequest,
+} from '../../domain/policy-types.js'
+import { isOutbound } from '../../domain/policy-types.js'
 import type { StateStorePort } from '../../domain/ports/state-store.port.js'
 import type {
   RunModePort,
@@ -36,22 +42,59 @@ export class RunMode implements RunModePort {
     return { ...this.state }
   }
 
-  gate(message: OutboundMessage): GateDecision {
-    if (this.state.halted) {
-      return { verdict: 'block', reasons: ['emergency halt is active'] }
+  decide(
+    request: PolicyRequest,
+    options: PolicyOptions = {},
+  ): PolicyDecision {
+    // Device-only actions never leave the phone; the autonomy policy is the
+    // only thing that grades them.
+    if (!isOutbound(request.surface)) {
+      return { verdict: 'allow', reasons: [] }
     }
 
-    const violations = this.guard.inspect(message)
+    if (this.state.halted) {
+      return {
+        verdict: 'block',
+        reasons: ['emergency halt is active (run /watch resume)'],
+      }
+    }
+
+    const violations = this.guard.inspect({
+      app: request.app,
+      surface: request.surface,
+      peer: request.peer,
+      text: request.text ?? '',
+    })
     if (violations.length > 0) {
       return { verdict: 'block', reasons: violations }
     }
+
+    if (options.humanApproved) {
+      return { verdict: 'allow', reasons: ['approved by owner'] }
+    }
     if (!this.state.enabled) {
-      return { verdict: 'block', reasons: ['auto send is disabled'] }
+      return {
+        verdict: 'block',
+        reasons: ['auto send is disabled (run /watch enable)'],
+      }
     }
     if (this.state.dryRun) {
       return { verdict: 'dry-run', reasons: ['dry run mode'] }
     }
-    return { verdict: 'send', reasons: [] }
+    return { verdict: 'allow', reasons: [] }
+  }
+
+  gate(message: OutboundMessage): GateDecision {
+    const decision = this.decide({
+      app: message.app,
+      surface: 'message',
+      peer: message.peer,
+      text: message.text,
+    })
+    return {
+      verdict: decision.verdict === 'allow' ? 'send' : decision.verdict,
+      reasons: decision.reasons,
+    }
   }
 
   enable(): void {

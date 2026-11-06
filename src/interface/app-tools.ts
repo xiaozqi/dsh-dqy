@@ -1,17 +1,45 @@
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import { DeviceError } from '../domain/errors.js'
+import { DeviceError, PolicyBlockedError } from '../domain/errors.js'
+import type { PolicyRequest } from '../domain/policy-types.js'
 import type { FishServices } from './tools.js'
 
 export function registerAppTools(
   ctx: Context,
   services: FishServices,
 ): void {
-  ctx.tools.register(
+  // Same policy as the core tools: a hard deadline per call, and no parallel
+  // execution unless a tool is purely read-only.
+  const register = (
+    definition: ToolDefinition,
+    concurrencySafe = false,
+  ): void => {
+    ctx.tools.register({
+      ...definition,
+      timeoutMs: definition.timeoutMs ?? services.toolTimeoutMs,
+      isConcurrencySafe:
+        definition.isConcurrencySafe ?? (() => concurrencySafe),
+    })
+  }
+
+  // One gate call shared by the direct-service paths (they bypass the guarded
+  // adapter registry because they hold the adapter instance itself).
+  const gate = (request: PolicyRequest, what: string) => {
+    const decision = services.runMode.decide(request)
+    if (decision.verdict === 'block') {
+      throw new PolicyBlockedError(
+        'POLICY_BLOCKED',
+        `${what} 被安全策略拦下：${decision.reasons.join('；')}`,
+        decision.reasons,
+      )
+    }
+    return decision
+  }
+  register(
     defineTool({
       name: 'fish_speak',
       description:
-        'Blue Fat Fish speaks the given text aloud in her own voice. ' +
+        'DQY speaks the given text aloud in her own voice. ' +
         'voice may be an edge-tts name or a cloned voice name from fish_clone_voice.',
       parameters: {
         text: {
@@ -45,11 +73,11 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_clone_voice',
       description:
-        'Clone a voice from a speech sample so Blue Fat Fish can speak in it. ' +
+        'Clone a voice from a speech sample so DQY can speak in it. ' +
         'Sample should be 5-10 seconds of clear, articulate speech.',
       parameters: {
         samplePath: {
@@ -83,11 +111,11 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_listen',
       description:
-        'Blue Fat Fish listens: recognize speech from a local audio file, or record the phone mic and transcribe it.',
+        'DQY listens: recognize speech from a local audio file, or record the phone mic and transcribe it.',
       parameters: {
         audioPath: {
           type: 'string',
@@ -125,12 +153,19 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_qq_voice_text',
       description:
-        'Send the text as a QQ voice message in her own voice (experimental).',
+        'Send the text as a QQ voice message in her own voice (experimental). ' +
+        'The recipient must be named explicitly and must be whitelisted.',
       parameters: {
+        peer: {
+          type: 'string',
+          required: true,
+          description:
+            'QQ friend / group name to speak into (must be in control.allowedPeers)',
+        },
         text: {
           type: 'string',
           required: true,
@@ -153,20 +188,37 @@ export function registerAppTools(
         ],
       },
       async execute(args) {
-        const result = await services.qq.sendVoiceWithText(
-          args.text,
-          args.voice ?? undefined,
-        )
+        // The service re-checks the same gate: the tool-level call keeps the
+        // work out of the device path, the service call keeps it enforced even
+        // if another caller forgets.
+        const result = await services.qq.sendVoiceWithText({
+          peer: args.peer,
+          text: args.text,
+          voice: args.voice ?? undefined,
+          authorize: input =>
+            services.runMode.decide({
+              app: 'qq',
+              surface: 'voice',
+              peer: input.peer,
+              text: input.text,
+            }),
+        })
         return { ...result }
       },
     }),
   )
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_ocr',
       description:
         'Read text on the current screen through OCR, with position of each text block.',
-      parameters: {},
+      parameters: {
+        screenshotPath: {
+          type: 'string',
+          description:
+            'Optional screenshot already returned by fish_observe; reusing it avoids a second capture',
+        },
+      },
       output: {
         schema: {
           type: 'array',
@@ -198,11 +250,11 @@ export function registerAppTools(
           },
         ],
       },
-      async execute() {
-        const observation = await services.device.observe()
-        const blocks = await services.vision.ocr(
-          observation.screenshotPath,
-        )
+      async execute(args) {
+        const screenshotPath =
+          args.screenshotPath ??
+          (await services.device.observe()).screenshotPath
+        const blocks = await services.vision.ocr(screenshotPath)
         return blocks.map(b => ({
           text: b.text,
           confidence: b.confidence,
@@ -212,7 +264,7 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_qq_reply',
       description:
@@ -236,6 +288,15 @@ export function registerAppTools(
       async execute(args) {
         const replies = await services.qq.replyToUnread({
           maxConversations: args.maxConversations ?? 3,
+          // Replies generated here never passed through the guarded adapter
+          // registry, so the policy is enforced per reply.
+          authorize: input =>
+            services.runMode.decide({
+              app: 'qq',
+              surface: 'message',
+              peer: input.peer,
+              text: input.text,
+            }),
         })
         return replies.map(r => ({
           peer: r.peer,
@@ -247,7 +308,7 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_douyin_feed',
       description:
@@ -292,7 +353,7 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_douyin_interact',
       description:
@@ -332,25 +393,58 @@ export function registerAppTools(
             return {
               ...(await services.douyin.likeCurrentVideo()),
             }
-          case 'comment':
-            return {
-              ...(await services.douyin.comment(
-                args.text ?? '',
-              )),
+          case 'comment': {
+            // A comment is public content: policy decides before the device
+            // ever types it.
+            const decision = gate(
+              {
+                app: 'douyin',
+                surface: 'comment',
+                text: args.text ?? '',
+              },
+              'douyin comment',
+            )
+            if (decision.verdict === 'dry-run') {
+              return { action: 'comment', detail: 'dry-run: not sent', sent: false }
             }
-          case 'forward':
             return {
-              ...(await services.douyin.forward(
-                args.target ?? '',
-              )),
+              ...(await services.douyin.comment(args.text ?? '')),
             }
-          case 'mention':
+          }
+          case 'forward': {
+            const target = args.target ?? ''
+            const decision = gate(
+              { app: 'douyin', surface: 'share', peer: target },
+              'douyin forward',
+            )
+            if (decision.verdict === 'dry-run') {
+              return { action: 'forward', detail: 'dry-run: not sent', sent: false }
+            }
+            return {
+              ...(await services.douyin.forward(target)),
+            }
+          }
+          case 'mention': {
+            const target = args.target ?? ''
+            const decision = gate(
+              {
+                app: 'douyin',
+                surface: 'mention',
+                peer: target,
+                text: args.text ?? '',
+              },
+              'douyin mention',
+            )
+            if (decision.verdict === 'dry-run') {
+              return { action: 'mention', detail: 'dry-run: not sent', sent: false }
+            }
             return {
               ...(await services.douyin.mention(
-                args.target ?? '',
+                target,
                 args.text ?? '',
               )),
             }
+          }
           default:
             throw new DeviceError(
               'DOUYIN_BAD_ACTION',
@@ -361,7 +455,7 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_play_game',
       description:
@@ -411,7 +505,7 @@ export function registerAppTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_schedule_status',
       description:

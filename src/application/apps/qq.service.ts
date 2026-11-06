@@ -1,4 +1,5 @@
-import { DeviceError } from '../../domain/errors.js'
+import { createHash } from 'node:crypto'
+import { DeviceError, PolicyBlockedError } from '../../domain/errors.js'
 import type { AppAdapter } from '../../domain/ports/app-adapter.port.js'
 import type { UiDriverPort } from '../../domain/ports/ui-driver.port.js'
 import type {
@@ -23,6 +24,8 @@ import type {
 import { failResult, okResult } from '../../domain/adapter-types.js'
 import type { LlmPort } from '../../domain/ports/llm.port.js'
 import type { MemoryPort } from '../../domain/ports/memory.port.js'
+import type { MessageStatePort } from '../../domain/ports/message-state.port.js'
+import type { PolicyDecision } from '../../domain/policy-types.js'
 import type { VoicePort } from '../../domain/ports/voice.port.js'
 import type {
   ConversationMessage,
@@ -30,10 +33,12 @@ import type {
 } from '../../domain/app-types.js'
 import type { UiNode } from '../../domain/types.js'
 import {
+  confirmOutgoing,
+  ensureForeground,
+  enterText,
   openAndWait,
   pushMedia,
   tapSend,
-  typeIntoInput,
 } from '../adapters/base-adapter.js'
 import {
   centerOf,
@@ -47,6 +52,10 @@ import {
 
 export const QQ_PACKAGE = 'com.tencent.mobileqq'
 
+function hashText(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16)
+}
+
 const SELECTORS = {
   unreadBadge: /未读|unread|新消息/i,
   inputHint: /发送消息|说点什么|输入/,
@@ -58,6 +67,11 @@ const SELECTORS = {
 
 export interface QqOptions {
   maxConversations?: number
+  /**
+   * Called before a reply is transmitted. The caller wires this to the single
+   * outbound policy gate; a blocked/dry-run verdict means nothing is sent.
+   */
+  authorize?: (input: { peer: string; text: string }) => PolicyDecision
 }
 
 export interface VoiceTextResult {
@@ -117,6 +131,9 @@ export class QqService
     private readonly llm: LlmPort,
     private readonly memory: MemoryPort,
     private readonly voice: VoicePort,
+    // Optional reply journal: when present, an already-answered conversation
+    // is skipped instead of answered again on the next call.
+    private readonly messageState?: MessageStatePort,
   ) {}
 
   async initialize(): Promise<void> {
@@ -139,31 +156,16 @@ export class QqService
     try {
       await this.driver.connect()
       await openAndWait(this.driver, QQ_PACKAGE, { timeoutMs: 30000 })
-      await withRetry(
-        async () => {
-          await this.enterPeerConversation(peer)
-          await typeIntoInput(this.driver, text, undefined, {
-            timeoutMs: 12000,
-          })
-          await this.submitSend()
-        },
-        { attempts: 2, delayMs: 1500 },
-      )
-      // Confirm the composed bubble now renders in the conversation.
-      const confirmed = await waitFor(
-        async () => {
-          const obs = await this.driver.observe()
-          const hit = findNode(
-            obs.roots,
-            node => node.text.includes(text),
-          )
-          return hit ? true : null
-        },
-        { timeoutMs: 8000 },
-      ).then(
-        () => true,
-        () => false,
-      )
+      await this.enterPeerConversation(peer)
+      // The chat can change under us (incoming notification, another actor),
+      // so never type into a screen that is not QQ.
+      await ensureForeground(this.driver, QQ_PACKAGE)
+      await enterText(this.driver, text, undefined, { timeoutMs: 12000 })
+      await this.submitSend()
+      // A new outgoing bubble is the only proof of delivery: a failed send
+      // leaves the text sitting in the composer, which is exactly what the old
+      // "does this text appear anywhere" check mistook for success.
+      const confirmed = await confirmOutgoing(this.driver, text)
       await this.memory.remember({
         kind: 'event',
         content: `QQ sendMessage to ${peer}: ${text} (confirmed=${confirmed})`,
@@ -246,9 +248,12 @@ export class QqService
       await sleep(900)
       if (input.caption?.trim()) {
         try {
-          await typeIntoInput(this.driver, input.caption.trim(), {
-            className: /EditText/,
-          }, { timeoutMs: 3000 })
+          await enterText(
+            this.driver,
+            input.caption.trim(),
+            { className: /EditText/ },
+            { timeoutMs: 3000 },
+          )
         } catch {
           // Caption input is optional; ignore if unavailable.
         }
@@ -396,13 +401,48 @@ export class QqService
   // Legacy public tools (kept for tool compatibility)
   // ---------------------------------------------------------------------
 
-  async sendVoiceWithText(
-    text: string,
-    voice?: string,
-  ): Promise<VoiceTextResult> {
+  async sendVoiceWithText(input: {
+    peer: string
+    text: string
+    voice?: string
+    authorize?: (input: {
+      peer: string
+      text: string
+    }) => PolicyDecision
+  }): Promise<VoiceTextResult> {
+    const peer = input.peer.trim()
+    const text = input.text
+    if (!peer || !text.trim()) {
+      throw new DeviceError(
+        'QQ_BAD_VOICE_INPUT',
+        'peer and text must not be empty',
+      )
+    }
+    // A voice message is an outbound message: it needs the same gate and the
+    // same recipient check as text, otherwise it could speak into any open chat.
+    const decision = input.authorize?.({ peer, text })
+    if (decision?.verdict === 'block') {
+      throw new PolicyBlockedError(
+        'POLICY_BLOCKED',
+        `voice message to ${peer} blocked: ${decision.reasons.join('; ')}`,
+        decision.reasons,
+      )
+    }
+    if (decision?.verdict === 'dry-run') {
+      return {
+        text,
+        audioPath: '',
+        remotePath: '',
+        durationMs: 0,
+        sent: false,
+      }
+    }
     await this.driver.connect()
-    const spoken = await this.voice.speak(text, voice, false)
-    const remoteDir = '/sdcard/blue-fat-fish/voice'
+    await openAndWait(this.driver, QQ_PACKAGE, { timeoutMs: 30000 })
+    await this.enterPeerConversation(peer)
+    await ensureForeground(this.driver, QQ_PACKAGE)
+    const spoken = await this.voice.speak(text, input.voice, false)
+    const remoteDir = '/sdcard/dqy/voice'
     const remote = `${remoteDir}/fish-${Date.now()}.mp3`
     await this.driver.pushFile(spoken.audioPath, remote)
 
@@ -452,10 +492,19 @@ export class QqService
   async replyToUnread(
     options: QqOptions = {},
   ): Promise<ConversationReply[]> {
+    if (!options.authorize) {
+      // Defense in depth: without the outbound gate this path would send
+      // replies to whoever the heuristic picked. Refuse instead.
+      throw new DeviceError(
+        'POLICY_NOT_WIRED',
+        'replyToUnread requires an outbound policy gate',
+      )
+    }
     const maxConversations = options.maxConversations ?? 3
     await this.driver.connect()
     await this.driver.openApp(QQ_PACKAGE)
     await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
+    await ensureForeground(this.driver, QQ_PACKAGE)
     await sleep(2000)
 
     const rows = await this.collectUnreadRows()
@@ -474,7 +523,39 @@ export class QqService
         continue
       }
 
+      // Journal by peer + last inbound text, so a retry (or a second tool call
+      // while the badge has not cleared yet) cannot answer twice.
+      const last = incoming[incoming.length - 1]?.content ?? ''
+      const key = `qq-reply:${peer}:${hashText(last)}`
+      if (this.messageState?.seen(key)) {
+        results.push({ peer, incoming, reply: '', sent: false })
+        await this.driver.pressKey('back')
+        await sleep(800)
+        continue
+      }
+      this.messageState?.claim({
+        idempotencyKey: key,
+        app: QQ_PACKAGE,
+        conversationId: `qq:${peer}`,
+        textHash: hashText(last),
+      })
+
       const reply = await this.composeReply(peer, incoming)
+      const decision = options.authorize({ peer, text: reply })
+      if (decision.verdict !== 'allow') {
+        results.push({ peer, incoming, reply, sent: false })
+        await this.memory.remember({
+          kind: 'event',
+          content:
+            `QQ reply to ${peer} ${decision.verdict}: ${reply} ` +
+            `(${decision.reasons.join('; ')})`,
+          tags: ['qq', decision.verdict, peer],
+        })
+        await this.driver.pressKey('back')
+        await sleep(1000)
+        continue
+      }
+
       const sent = await this.sendReply(reply)
       results.push({ peer, incoming, reply, sent })
 
@@ -482,7 +563,8 @@ export class QqService
         kind: 'event',
         content:
           `QQ conversation with ${peer}: ` +
-          `${incoming.map(m => m.content).join(' / ')} -> replied: ${reply}`,
+          `${incoming.map(m => m.content).join(' / ')} -> ` +
+          `${sent ? 'replied' : 'reply not confirmed'}: ${reply}`,
         tags: ['qq', 'conversation', peer],
       })
       await this.driver.pressKey('back')
@@ -533,7 +615,7 @@ export class QqService
     )
     await this.driver.tap(centerOf(searchEntry))
     await sleep(1200)
-    await typeIntoInput(this.driver, peer, undefined, {
+    await enterText(this.driver, peer, undefined, {
       timeoutMs: 8000,
     })
     await sleep(1000)
@@ -788,7 +870,10 @@ export class QqService
             /^\d+$/.test(child.text),
         ) !== null,
     )
-    return unread.length > 0 ? unread : clickable
+    // Only rows that actually carry an unread badge. The old fallback to every
+    // clickable row meant "badges cleared" became "these chats are unread",
+    // and the fish messaged people who had not written anything.
+    return unread
   }
 
   private async readMessages(): Promise<ConversationMessage[]> {
@@ -836,7 +921,7 @@ export class QqService
       {
         role: 'system',
         content:
-          'You are Blue Fat Fish replying inside mobile QQ. ' +
+          'You are DQY replying inside mobile QQ. ' +
           'Write one short, natural, colloquial Chinese reply. ' +
           'Output the reply only, no quotes, no explanation, under 50 Chinese characters.',
       },
@@ -868,22 +953,11 @@ export class QqService
     }
     await this.driver.tap(centerOf(input))
     await sleep(800)
-    await this.driver.inputText(reply)
+    // Chinese replies must not go through the ASCII-only `input text` path.
+    await enterText(this.driver, reply)
     await sleep(500)
-
-    const after = await this.driver.observe()
-    const send = findNode(
-      after.roots,
-      node =>
-        SELECTORS.send.test(node.text) ||
-        SELECTORS.send.test(node.desc),
-    )
-    if (send) {
-      await this.driver.tap(centerOf(send))
-    } else {
-      await this.driver.pressKey('enter')
-    }
-    return true
+    await this.submitSend()
+    return confirmOutgoing(this.driver, reply)
   }
 
   private peerName(row: UiNode): string {

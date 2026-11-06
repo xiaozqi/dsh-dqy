@@ -1,4 +1,9 @@
-import { spawn } from 'node:child_process'
+import { ProcessSupervisor } from '../process-supervisor.js'
+
+// TTS / ASR workers are long-running python processes; a wedged one must fail
+// the call instead of blocking the conversation. One shared supervisor gives
+// each call a deadline and kills the child tree on expiry.
+const voiceSupervisor = new ProcessSupervisor()
 import { VisionError } from '../../domain/errors.js'
 import type { VoicePort } from '../../domain/ports/voice.port.js'
 import type {
@@ -88,7 +93,7 @@ export class PythonVoice implements VoicePort {
     deviceSerial: string,
   ): Promise<string> {
     const ts = new Date().toISOString().replace(/[:.]/g, '-')
-    const remote = `/sdcard/blue-fat-fish/rec-${ts}.mp4`
+    const remote = `/sdcard/dqy/rec-${ts}.mp4`
     const local = `${this.options.audioDir}/rec-${ts}.mp4`
     const data = (await this.call({
       mode: 'listen_phone',
@@ -107,55 +112,37 @@ export class PythonVoice implements VoicePort {
     return `${this.options.audioDir}/fish-${ts}-${hash}`
   }
 
-  private call(command: Record<string, unknown>): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        this.options.pythonPath,
-        [this.options.workerPath, JSON.stringify(command)],
-        { windowsHide: true },
+  private async call(command: Record<string, unknown>): Promise<unknown> {
+    const result = await voiceSupervisor.run(
+      this.options.pythonPath,
+      [this.options.workerPath, JSON.stringify(command)],
+      { timeoutMs: 120000 },
+    )
+    if (result.timedOut) {
+      throw new VisionError(
+        'VOICE_TIMEOUT',
+        'voice worker exceeded 120s and was killed',
       )
-      const outChunks: Buffer[] = []
-      const errChunks: Buffer[] = []
-
-      child.stdout.on('data', chunk => outChunks.push(Buffer.from(chunk)))
-      child.stderr.on('data', chunk => errChunks.push(Buffer.from(chunk)))
-      child.on('error', err => {
-        reject(new VisionError('VOICE_NOT_STARTABLE', err.message))
-      })
-      child.on('close', code => {
-        if (code !== 0) {
-          reject(
-            new VisionError(
-              'VOICE_PROCESS_FAILED',
-              Buffer.concat(errChunks).toString('utf8') ||
-                `worker exit ${code}`,
-            ),
-          )
-          return
-        }
-        let parsed: WorkerResponse
-        try {
-          parsed = JSON.parse(
-            Buffer.concat(outChunks).toString('utf8'),
-          ) as WorkerResponse
-        } catch (err) {
-          reject(
-            new VisionError('VOICE_BAD_JSON', (err as Error).message),
-          )
-          return
-        }
-        if (!parsed.ok) {
-          reject(
-            new VisionError(
-              'VOICE_WORKER_ERROR',
-              parsed.error ?? 'unknown worker error',
-            ),
-          )
-          return
-        }
-        resolve(parsed.data)
-      })
-    })
+    }
+    if (result.code !== 0) {
+      throw new VisionError(
+        'VOICE_PROCESS_FAILED',
+        result.stderr || `worker exit ${result.code}`,
+      )
+    }
+    let parsed: WorkerResponse
+    try {
+      parsed = JSON.parse(result.stdout) as WorkerResponse
+    } catch (err) {
+      throw new VisionError('VOICE_BAD_JSON', (err as Error).message)
+    }
+    if (!parsed.ok) {
+      throw new VisionError(
+        'VOICE_WORKER_ERROR',
+        parsed.error ?? 'unknown worker error',
+      )
+    }
+    return parsed.data
   }
 }
 

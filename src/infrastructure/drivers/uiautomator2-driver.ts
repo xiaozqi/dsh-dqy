@@ -1,4 +1,9 @@
-import { spawn } from 'node:child_process'
+import { ProcessSupervisor } from '../process-supervisor.js'
+
+// One supervisor for every worker call: each python worker gets a deadline and
+// its child tree is killed on timeout, so a wedged atx-agent fails fast instead
+// of hanging a tool call until the harness gives up.
+const workerSupervisor = new ProcessSupervisor()
 import { mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -206,59 +211,40 @@ export class Uiautomator2Driver implements UiDriverPort {
     )
   }
 
-  private call(command: Record<string, unknown>): Promise<unknown> {
+  private async call(command: Record<string, unknown>): Promise<unknown> {
     const payload = {
       ...command,
       adb: this.adbPath,
       serial: this.serial,
     }
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        this.pythonPath,
-        [this.workerPath, JSON.stringify(payload)],
-        { windowsHide: true },
+    const result = await workerSupervisor.run(
+      this.pythonPath,
+      [this.workerPath, JSON.stringify(payload)],
+      { timeoutMs: 20000 },
+    )
+    if (result.timedOut) {
+      throw new DriverUnavailableError(
+        'U2_TIMEOUT',
+        'uiautomator2 worker exceeded 20s; the phone may be wedged',
       )
-      const outChunks: Buffer[] = []
-      const errChunks: Buffer[] = []
-
-      child.stdout.on('data', chunk => outChunks.push(Buffer.from(chunk)))
-      child.stderr.on('data', chunk => errChunks.push(Buffer.from(chunk)))
-      child.on('error', err => {
-        reject(
-          new DriverUnavailableError(
-            'U2_UNAVAILABLE',
-            `cannot start python worker: ${err.message}`,
-          ),
-        )
-      })
-      child.on('close', code => {
-        const raw = Buffer.concat(outChunks).toString('utf8')
-        let parsed: WorkerResponse
-        try {
-          parsed = JSON.parse(raw) as WorkerResponse
-        } catch {
-          reject(
-            new DeviceError(
-              'U2_BAD_JSON',
-              Buffer.concat(errChunks).toString('utf8') ||
-                raw ||
-                `worker exit ${code}`,
-            ),
-          )
-          return
-        }
-        const message = parsed.error || `worker exit ${code}`
-        if (parsed.unavailable) {
-          reject(new DriverUnavailableError('U2_UNAVAILABLE', message))
-          return
-        }
-        if (!parsed.ok) {
-          reject(new DeviceError('U2_OP_FAILED', message))
-          return
-        }
-        resolve(parsed.data)
-      })
-    })
+    }
+    let parsed: WorkerResponse
+    try {
+      parsed = JSON.parse(result.stdout) as WorkerResponse
+    } catch {
+      throw new DeviceError(
+        'U2_BAD_JSON',
+        result.stderr || result.stdout || `worker exit ${result.code}`,
+      )
+    }
+    const message = parsed.error || `worker exit ${result.code}`
+    if (parsed.unavailable) {
+      throw new DriverUnavailableError('U2_UNAVAILABLE', message)
+    }
+    if (!parsed.ok) {
+      throw new DeviceError('U2_OP_FAILED', message)
+    }
+    return parsed.data
   }
 
   private pruneCaptures(): void {

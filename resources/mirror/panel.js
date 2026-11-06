@@ -10,7 +10,7 @@
   if (window.__fimMirrorReady) return
   window.__fimMirrorReady = true
 
-  var B = '/fishline-mirror'
+  var B = '/dqy-mirror'
   var Z = 2147483000
   // 宿主在 /panel.js 里把占位符换成每次启动的随机 token；写操作必须带上它。
   // 跨站页面既读不到这段脚本，也猜不到这个值。

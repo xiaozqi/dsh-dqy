@@ -34,6 +34,12 @@ export class NotificationService implements NotificationPort {
     // Keeping this as a plain callback (not a domain port) avoids widening
     // NotificationPort for a single consumer.
     private readonly allowListener?: (event: NotificationEvent) => void,
+    /**
+     * A filter that throws must block instead of delivering the event. An
+     * allowed event can wake the autonomy loop, so failing open here would let
+     * a broken filter turn into an autonomous action.
+     */
+    private readonly failClosed = true,
   ) {}
 
   get started(): boolean {
@@ -107,8 +113,15 @@ export class NotificationService implements NotificationPort {
     let decision: NotificationDecision
     try {
       decision = await this.pipeline.decide(event)
-    } catch {
-      decision = { event, action: 'allow', reason: 'pipeline error' }
+    } catch (err) {
+      // Fail closed: an exception in the filter chain is not evidence that the
+      // notification is safe, and an allowed event can wake the autonomy loop.
+      console.warn(
+        `[notifications] filter chain failed: ${(err as Error).message}`,
+      )
+      decision = this.failClosed
+        ? { event, action: 'block', reason: 'pipeline-error' }
+        : { event, action: 'allow', reason: 'pipeline-error' }
     }
     if (decision.action === 'allow') {
       this.allowed += 1

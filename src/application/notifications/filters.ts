@@ -95,7 +95,8 @@ export class SemanticFilter implements NotificationFilter {
       }
       return null
     } catch {
-      return null
+      // A judge that timed out or crashed is not a positive answer.
+      return { event, action: 'block', reason: this.id }
     }
   }
 

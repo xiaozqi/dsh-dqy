@@ -1,0 +1,43 @@
+import { type AdapterResult, type AdapterTodo, type CapabilityId } from '../../domain/adapter-types.js';
+import type { AppAdapter } from '../../domain/ports/app-adapter.port.js';
+import type { CommentInput, CommentItem, CommentCapability } from '../../domain/ports/capabilities/comment.port.js';
+import type { FeedCapability, FeedInput } from '../../domain/ports/capabilities/feed.port.js';
+import type { LiveCapability, WatchLiveInput } from '../../domain/ports/capabilities/live.port.js';
+import type { ConversationPreview, MessageCapability, SendImageInput, SendMessageInput } from '../../domain/ports/capabilities/message.port.js';
+import type { MentionInput, SocialCapability } from '../../domain/ports/capabilities/social.port.js';
+import type { MemoryPort } from '../../domain/ports/memory.port.js';
+import type { UiDriverPort } from '../../domain/ports/ui-driver.port.js';
+export declare const BILIBILI_PACKAGE = "tv.danmaku.bili";
+export declare class BilibiliAdapter implements AppAdapter, FeedCapability, CommentCapability, SocialCapability, MessageCapability, LiveCapability {
+    private readonly driver;
+    private readonly memory;
+    readonly id = "bilibili";
+    readonly displayName = "\u54D4\u54E9\u54D4\u54E9";
+    readonly packageName = "tv.danmaku.bili";
+    readonly capabilities: ReadonlySet<CapabilityId>;
+    readonly capability: never;
+    readonly todos: readonly AdapterTodo[];
+    constructor(driver: UiDriverPort, memory: MemoryPort);
+    initialize(): Promise<void>;
+    browseFeed(input?: FeedInput): Promise<AdapterResult>;
+    comment(input: CommentInput): Promise<AdapterResult>;
+    replyComment(input: CommentInput): Promise<AdapterResult>;
+    browseComments(limit?: number): Promise<{
+        items: CommentItem[];
+    }>;
+    mention(input: MentionInput): Promise<AdapterResult>;
+    sendMessage(input: SendMessageInput): Promise<AdapterResult>;
+    sendImage(input: SendImageInput): Promise<AdapterResult>;
+    readConversation(peer?: string, limit?: number): Promise<ConversationPreview>;
+    watchLive(input?: WatchLiveInput): Promise<AdapterResult>;
+    private ensureCommentPanel;
+    private findAny;
+    private tapAny;
+    private findCommentRow;
+    private tapFirstGridCard;
+    private enterFirstGridCard;
+    private tapFirstGalleryThumb;
+    private hitKeywords;
+    private doubleTap;
+    private remember;
+}

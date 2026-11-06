@@ -19,7 +19,7 @@ import { createFileLogger } from '../lib/infrastructure/file-logger.js'
 import { MirrorHttpController } from '../lib/infrastructure/web/mirror-http.controller.js'
 import { MirrorPanelService } from '../lib/application/mirror/mirror-panel.service.js'
 
-const BASE = '/fishline-mirror'
+const BASE = '/dqy-mirror'
 // Set the target device explicitly: FIM_TEST_SERIAL=xxxx node tests/verify-mirror.mjs
 const SERIAL = process.env.FIM_TEST_SERIAL ?? ''
 

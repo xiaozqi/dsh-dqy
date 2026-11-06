@@ -12,7 +12,7 @@ import {
 function freshDir(name) {
   return join(
     tmpdir(),
-    `fishline-smoke-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    `dqy-smoke-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
 }
 

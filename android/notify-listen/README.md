@@ -1,7 +1,7 @@
 # notify-listen
 
 A minimal Android app that turns the phone's own notification stream into HTTP
-POST requests for the Blue Fat Fish plugin. It is the privileged alternative to
+POST requests for the DQY plugin. It is the privileged alternative to
 the logcat-based source.
 
 ## Why a NotificationListenerService
@@ -45,7 +45,7 @@ The permission cannot be granted from code. On the phone:
 Alternatively open the settings screen directly:
 
 ```bash
-adb -s <serial> shell appops set com.bff.notify GET_NOTIFICATION true
+adb -s <serial> shell appops set com.dqy.notify GET_NOTIFICATION true
 # or, on most EMUI builds:
 adb -s <serial> shell am start -a android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
 ```

@@ -14,9 +14,9 @@ import os
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Debug log path: defaults next to this script, override with BFF_NOTIFY_LOG.
+# Debug log path: defaults next to this script, override with DQY_NOTIFY_LOG.
 LOG = os.environ.get(
-    "BFF_NOTIFY_LOG",
+    "DQY_NOTIFY_LOG",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify-received.log"),
 )
 

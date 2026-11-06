@@ -1,4 +1,9 @@
-import { spawn } from 'node:child_process'
+import { ProcessSupervisor } from '../process-supervisor.js'
+
+// OCR runs on every fish_ocr call and template lookup; a wedged python worker
+// used to hang the whole tool call. One shared supervisor gives each call a
+// deadline and kills the child tree on expiry.
+const visionSupervisor = new ProcessSupervisor()
 import { VisionError } from '../../domain/errors.js'
 import type { VisionPort } from '../../domain/ports/vision.port.js'
 import type { Point } from '../../domain/types.js'
@@ -84,60 +89,37 @@ export class PythonVision implements VisionPort {
     return point ? { x: point[0], y: point[1] } : null
   }
 
-  private call(command: Record<string, unknown>): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        this.pythonPath,
-        [this.workerPath, JSON.stringify(command)],
-        { windowsHide: true },
+  private async call(command: Record<string, unknown>): Promise<unknown> {
+    const result = await visionSupervisor.run(
+      this.pythonPath,
+      [this.workerPath, JSON.stringify(command)],
+      { timeoutMs: 30000 },
+    )
+    if (result.timedOut) {
+      throw new VisionError(
+        'VISION_TIMEOUT',
+        'vision worker exceeded 30s and was killed',
       )
-      const outChunks: Buffer[] = []
-      const errChunks: Buffer[] = []
-
-      child.stdout.on('data', chunk => outChunks.push(Buffer.from(chunk)))
-      child.stderr.on('data', chunk => errChunks.push(Buffer.from(chunk)))
-      child.on('error', err => {
-        reject(
-          new VisionError('VISION_NOT_STARTABLE', err.message),
-        )
-      })
-      child.on('close', code => {
-        if (code !== 0) {
-          reject(
-            new VisionError(
-              'VISION_PROCESS_FAILED',
-              Buffer.concat(errChunks).toString('utf8') ||
-                `worker exit ${code}`,
-            ),
-          )
-          return
-        }
-        let parsed: WorkerResponse
-        try {
-          parsed = JSON.parse(
-            Buffer.concat(outChunks).toString('utf8'),
-          ) as WorkerResponse
-        } catch (err) {
-          reject(
-            new VisionError(
-              'VISION_BAD_JSON',
-              (err as Error).message,
-            ),
-          )
-          return
-        }
-        if (!parsed.ok) {
-          reject(
-            new VisionError(
-              'VISION_WORKER_ERROR',
-              parsed.error ?? 'unknown worker error',
-            ),
-          )
-          return
-        }
-        resolve(parsed.data)
-      })
-    })
+    }
+    if (result.code !== 0) {
+      throw new VisionError(
+        'VISION_PROCESS_FAILED',
+        result.stderr || `worker exit ${result.code}`,
+      )
+    }
+    let parsed: WorkerResponse
+    try {
+      parsed = JSON.parse(result.stdout) as WorkerResponse
+    } catch (err) {
+      throw new VisionError('VISION_BAD_JSON', (err as Error).message)
+    }
+    if (!parsed.ok) {
+      throw new VisionError(
+        'VISION_WORKER_ERROR',
+        parsed.error ?? 'unknown worker error',
+      )
+    }
+    return parsed.data
   }
 }
 

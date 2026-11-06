@@ -1,4 +1,4 @@
-package com.bff.notify
+package com.dqy.notify
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -12,8 +12,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
 
-private const val TAG = "BFFNotify"
-private const val STATUS_CHANNEL = "bff_status"
+private const val TAG = "DQYNotify"
+private const val STATUS_CHANNEL = "dqy_status"
 private const val STATUS_ID = 1001
 
 /**
@@ -110,13 +110,13 @@ class NotifyListener : NotificationListenerService() {
     private fun ensureChannel() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(STATUS_CHANNEL, "BFF 监听状态", NotificationManager.IMPORTANCE_MIN),
+            NotificationChannel(STATUS_CHANNEL, "DQY 监听状态", NotificationManager.IMPORTANCE_MIN),
         )
     }
 
     private fun buildStatusNotification(): Notification {
         return Notification.Builder(this, STATUS_CHANNEL)
-            .setContentTitle("大肥鱼通知监听运行中")
+            .setContentTitle("青鱼通知监听运行中")
             .setContentText("正在实时转发手机通知到电脑")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)

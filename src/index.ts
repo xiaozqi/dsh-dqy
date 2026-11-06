@@ -36,8 +36,10 @@ import { NotificationPipeline } from './application/notifications/pipeline.js'
 import { NotificationService } from './application/notifications/notification.service.js'
 import { Guardrails } from './application/guardrails.js'
 import type { SignInPlan } from './application/tasks/task-types.js'
+import type { SchedulePlan } from './domain/schedule-types.js'
 import { SignInService } from './application/tasks/signin.task.js'
-import { DeviceError } from './domain/errors.js'
+import { AdapterError, DeviceError, PolicyBlockedError } from './domain/errors.js'
+import type { CapabilityId } from './domain/adapter-types.js'
 import { LogcatNotificationSource } from './infrastructure/notifications/logcat-notification-source.js'
 import { HttpNotificationSource } from './infrastructure/notifications/http-notification-source.js'
 import { ReverseTunnelKeepAlive } from './infrastructure/notifications/reverse-tunnel.js'
@@ -61,6 +63,7 @@ import type { MirrorConfig } from './domain/mirror-types.js'
 import { AdbUiDriver } from './infrastructure/drivers/adb-ui-driver.js'
 import { FallbackUiDriver } from './infrastructure/drivers/fallback-ui-driver.js'
 import { Uiautomator2Driver } from './infrastructure/drivers/uiautomator2-driver.js'
+import { SerialDevice } from './infrastructure/device/serial-device.js'
 import { VisionUiDriver } from './infrastructure/drivers/vision-ui-driver.js'
 import { HttpLlm } from './infrastructure/llm/http-llm.js'
 import { HostLlm, detectHostLlm } from './infrastructure/llm/host-llm.js'
@@ -71,9 +74,14 @@ import { RoutedVoice } from './infrastructure/voice/routed-voice.js'
 import { VolcTts } from './infrastructure/voice/volc-tts.js'
 import { registerCommands } from './interface/commands.js'
 import { PERSONA, registerPersona } from './interface/prompt.js'
-import { registerTools } from './interface/tools.js'
+import { registerTools, type FishServices } from './interface/tools.js'
 import { FileStateStore } from './infrastructure/state/file-state-store.js'
-import { OutboundGuard } from './application/control/outbound-guard.js'
+import { OutboundGuard, buildPeerSet } from './application/control/outbound-guard.js'
+import { GuardedAdapterRegistry, surfaceFor } from './application/control/guarded-adapters.js'
+import {
+  ConfirmationQueue,
+  type PendingAction,
+} from './application/control/confirmation-queue.js'
 import { RunMode } from './application/control/run-mode.js'
 import { MessageStateStore } from './application/control/message-state-store.js'
 import { DmWatchPipeline } from './application/control/dm-watch-pipeline.js'
@@ -81,7 +89,7 @@ import { RecipeExecutor } from './application/recipes/recipe-executor.js'
 import { RecipeLoader } from './infrastructure/recipes/recipe-loader.js'
 import { RecipeDirectMessageSender } from './infrastructure/recipes/recipe-dm-sender.js'
 
-export const name = 'blue-fat-fish'
+export const name = 'dqy'
 export const inject = ['tools', 'webServer']
 
 const stepSchema = z.object({
@@ -121,7 +129,113 @@ const defaultJunkRules: {
   { pattern: '兼职|刷单|日结', action: 'block', caseSensitive: false },
 ]
 
-export const Config = z.object({
+/** Normalized shape after schemastery defaults are applied. */
+export interface NotificationRuleConfig {
+  pattern: string
+  action: 'allow' | 'block'
+  caseSensitive: boolean
+}
+
+export interface NotificationsConfig {
+  enabled: boolean
+  httpPort: number
+  /** Interface the notification bridge binds to. Loopback by default. */
+  bindHost: string
+  /** Optional shared secret the phone-side bridge must send in `x-fish-token`. */
+  token: string
+  maxBodyBytes: number
+  whitelist: string[]
+  blockedApps: string[]
+  minImportance: number
+  rules: NotificationRuleConfig[]
+  semanticEnabled: boolean
+  dedupeWindowMs: number
+  /** Blocking (instead of allowing) an event whose filter chain threw. */
+  failClosed: boolean
+}
+
+export interface MirrorOptionsConfig {
+  alwaysOnTop: boolean
+  windowWidth: number
+  turnScreenOff: boolean
+  audio: boolean
+  graceMs: number
+  reconnect: boolean
+}
+
+export interface AutonomyConfig {
+  enabled: boolean
+  heartbeatMs: number
+  minWakeMs: number
+  maxWakeMs: number
+  fallbackWakeMs: number
+  wakeOnEvent: boolean
+  guardEnabled: boolean
+  autoActions: string[]
+  forbiddenActions: string[]
+  /** Lifetime of a pending confirmation before it is dropped. */
+  confirmTtlMs: number
+}
+
+export interface SignInStepConfig {
+  kind: string
+  target?: string
+  value?: string
+  durationMs?: number
+}
+
+export interface SignInPlanConfig {
+  app: string
+  appName: string
+  successText: string[]
+  steps: SignInStepConfig[]
+}
+
+export interface ControlConfig {
+  enabled: boolean
+  dryRun: boolean
+  allowedPeers: string[]
+  maxLength: number
+  blockUrl: boolean
+  recipeDir: string
+}
+
+export interface FishConfig {
+  adbPath: string
+  scrcpyPath: string
+  deviceSerial: string
+  llmBaseUrl: string
+  llmModel: string
+  apiKey: string
+  llmTimeoutMs: number
+  dataDir: string
+  pythonPath: string
+  voicePythonPath: string
+  visionThreshold: number
+  templateDir: string
+  voice: string
+  volcApiKey: string
+  volcAppId: string
+  volcAccessKey: string
+  volcResourceId: string
+  volcSpeaker: string
+  gptsovitsSrc: string
+  gptsovitsModelsDir: string
+  gptsovitsPythonPath: string
+  allowedApps: string[]
+  forbiddenPackages: string[]
+  maxSteps: number
+  /** Per-tool deadline; a hung adb/python call must never outlive it. */
+  toolTimeoutMs: number
+  signInPlans: SignInPlanConfig[]
+  schedules: SchedulePlan[]
+  notifications: NotificationsConfig
+  mirror: MirrorOptionsConfig
+  autonomy: AutonomyConfig
+  control: ControlConfig
+}
+
+const configSchema = z.object({
   adbPath: z.string().default('adb'),
   scrcpyPath: z.string().default('scrcpy'),
   deviceSerial: z.string().default(''),
@@ -129,7 +243,7 @@ export const Config = z.object({
   llmModel: z.string().default('deepseek-chat'),
   apiKey: z.string().default(''),
   llmTimeoutMs: z.number().default(60000),
-  dataDir: z.string().default('./data/blue-fat-fish'),
+  dataDir: z.string().default('./data/dqy'),
   pythonPath: z.string().default('python'),
   voicePythonPath: z.string().default(''),
   visionThreshold: z.number().default(0.85),
@@ -146,14 +260,46 @@ export const Config = z.object({
   allowedApps: z.array(z.string()).default([]),
   forbiddenPackages: z
     .array(z.string())
-    .default(['com.android.settings', 'com.android.packageinstaller']),
+    .default([
+      'com.android.settings',
+      'com.android.packageinstaller',
+      // Money and payment surfaces stay out of reach even for /fish goals.
+      'com.eg.android.AlipayGphone',
+      'com.unionpay',
+    ]),
   maxSteps: z.number().default(40),
+  // Hard deadline for one fish_* tool call. A wedged adb/uiautomator2/python
+  // call must fail with a typed timeout instead of hanging the model step.
+  toolTimeoutMs: z
+    .number()
+    .default(180000)
+    .description('单个工具调用的硬超时（毫秒）。设备卡住时报超时，而不是一直转圈。'),
   signInPlans: z.array(planSchema).default([]),
   schedules: z.array(scheduleSchema).default([]),
   notifications: z
     .object({
       enabled: z.boolean().default(true),
       httpPort: z.number().default(14123),
+      // Loopback only. `adb reverse` forwards the phone to the host loopback,
+      // so binding wider has no benefit and lets the LAN forge notifications.
+      bindHost: z
+        .string()
+        .default('127.0.0.1')
+        .description('通知监听地址。保持 127.0.0.1：adb reverse 走的就是本机；改成 0.0.0.0 等于让局域网能伪造通知。'),
+      // When set, the phone-side bridge must send `x-fish-token: <token>`.
+      token: z
+        .string()
+        .default('')
+        .description('可选的共享密钥；设置后手机端桥接必须带 x-fish-token 请求头。'),
+      maxBodyBytes: z
+        .number()
+        .default(65536)
+        .description('单条通知的体积上限（字节），超过直接拒绝。'),
+      // A filter chain that throws must block, not deliver the event.
+      failClosed: z
+        .boolean()
+        .default(true)
+        .description('过滤链出错时是否拦截该通知。默认拦截（关闭等于出错就放行，不建议）。'),
       whitelist: z.array(z.string()).default([]),
       blockedApps: z
         .array(z.string())
@@ -200,28 +346,33 @@ export const Config = z.object({
       // runOnce instead of waiting for the next heartbeat.
       wakeOnEvent: z.boolean().default(true),
       guardEnabled: z.boolean().default(true),
-      // User-approved auto whitelist (medium autonomy): browse/like feed,
-      // post QQ moments, send DMs, daily sign-in run without human confirm.
-      // Money-related actions stay outside this list and thus need confirm.
+      // Nothing is auto-executed by default: every act decision lands in the
+      // confirmation queue until the owner whitelists that exact action here.
+      // `forbiddenActions` always wins, even if an entry is also listed above.
       autoActions: z
         .array(z.string())
-        .default([
-          'douyin/feed/browseFeed',
-          'qq/moment/publishMoment',
-          'message/sendMessage',
-          'signin/signIn',
-        ]),
-      // Outbound images / mentions / comments and passive time sinks.
+        .default([])
+        .description('允许她不经确认就执行的动作（格式 应用/能力/方法）。默认空：所有动作都要你点头。'),
+      // Outbound / public or unbounded actions: always require a human.
       forbiddenActions: z
         .array(z.string())
         .default([
+          'message/sendMessage',
           'message/sendImage',
+          'voice/sendVoiceText',
+          'moment/publishMoment',
           'social/mention',
           'comment/comment',
           'comment/replyComment',
           'game/runGame',
           'live/watchLive',
-        ]),
+        ])
+        .description('永远需要人工确认的动作；优先级高于 autoActions。'),
+      // How long a pending confirmation waits before it is silently dropped.
+      confirmTtlMs: z
+        .number()
+        .default(24 * 60 * 60 * 1000)
+        .description('待确认动作的有效期（毫秒），过期自动丢弃，默认 24 小时。'),
     })
     .default({}),
   // Watch control: safe defaults (sending disabled, dry run on). These drive
@@ -231,13 +382,25 @@ export const Config = z.object({
       enabled: z.boolean().default(false),
       dryRun: z.boolean().default(true),
       // Entries are `${packageName}:${peer}`; an empty list blocks every peer.
-      allowedPeers: z.array(z.string()).default([]),
+      allowedPeers: z
+        .array(z.string())
+        .default([])
+        .description('收件人白名单，格式 "包名:对方名"（如 com.tencent.mobileqq:张三）。空列表 = 谁都不发。'),
       maxLength: z.number().default(500),
       blockUrl: z.boolean().default(true),
       recipeDir: z.string().default(''),
     })
     .default({}),
 })
+
+/** Declared with an explicit annotation on purpose: see the note on `Config`. */
+/**
+ * Declared with an explicit annotation on purpose: the inferred type of a
+ * schemastery object references internal cosmokit paths, which TypeScript
+ * cannot name in the emitted `lib/index.d.ts` (TS2742). The output side is
+ * the hand-written `FishConfig`, so `apply()` is fully typed.
+ */
+export const Config: z<any, FishConfig> = configSchema
 
 // Local-only secret fallback: standalone runs reuse the DeepSeek key from
 // data/secrets.local.json when the host (DSH) injects no apiKey. The file is
@@ -263,7 +426,7 @@ function resolveSerialOrEmpty(adbPath: string, configured: string): string {
     return resolveDeviceSerial(adbPath, configured)
   } catch (err) {
     console.warn(
-      `[blue-fat-fish] device auto-discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+      `[dqy] device auto-discovery failed: ${err instanceof Error ? err.message : String(err)}`,
     )
     return ''
   }
@@ -273,11 +436,7 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '…' : s
 }
 
-export function apply(
-  ctx: Context,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  config: any,
-): void {
+export function apply(ctx: Context, config: FishConfig): void {
   const dataDir = resolve(config.dataDir)
   const packageRoot = resolve(
     fileURLToPath(new URL('.', import.meta.url)),
@@ -373,9 +532,23 @@ export function apply(
     vision: visionUi,
   })
   activeScreenshot = async () => {
+    // Deliberately the raw driver: this runs inside a vision fallback, i.e.
+    // while the serial device already holds its lock. Going through
+    // serialDriver here would deadlock the queue.
     const observation = await driver.observe()
     return observation.screenshotPath
   }
+  // Every consumer shares one serialized device: a single phone, one call at a
+  // time, with a deadline so a wedged adb call cannot hang the model step.
+  const serialDriver = new SerialDevice(driver, {
+    timeoutMs: Math.max(10_000, Math.floor(config.toolTimeoutMs * 0.8)),
+    observeTimeoutMs: Math.max(15_000, config.toolTimeoutMs),
+    onTimeout: (label, timeoutMs) => {
+      console.warn(
+        `[dqy] device call ${label} timed out after ${timeoutMs}ms`,
+      )
+    },
+  })
   const voice = new PythonVoice({
     pythonPath: config.voicePythonPath || config.pythonPath,
     workerPath: voiceWorker,
@@ -421,26 +594,52 @@ export function apply(
     memory,
     config.signInPlans as SignInPlan[],
   )
-  const qq = new QqService(driver, llm, memory, routedVoice)
-  const douyin = new DouyinService(driver, memory)
+
+  // ---- Outbound control: one policy gate in front of every send path ----
+  // The DM pipeline, the tools, the autonomy loop and an owner-approved
+  // confirmation all consult this single object, so /halt and the peer
+  // whitelist cannot be sidestepped by picking a different caller.
+  const stateStore = new FileStateStore(resolve(dataDir, 'state'))
+  const outboundGuard = new OutboundGuard({
+    allowedPeers: buildPeerSet(config.control.allowedPeers),
+    maxLength: config.control.maxLength,
+    blockUrl: config.control.blockUrl,
+  })
+  const runMode = new RunMode(stateStore, outboundGuard, {
+    enabled: config.control.enabled,
+    dryRun: config.control.dryRun,
+    halted: false,
+  })
+  const messageState = new MessageStateStore(stateStore)
+  const confirmations = new ConfirmationQueue(
+    stateStore,
+    config.autonomy.confirmTtlMs,
+  )
+  const qq = new QqService(serialDriver, llm, memory, routedVoice, messageState)
+  const douyin = new DouyinService(serialDriver, memory)
   const game = new GameService(
-    driver,
+    serialDriver,
     vision,
     templateRoot,
     new PriorityTapPolicy([]),
   )
-  const bilibili = new BilibiliAdapter(driver, memory)
-  const weibo = new WeiboAdapter(driver, memory)
-  const xhs = new XhsAdapter(driver, memory)
+  const bilibili = new BilibiliAdapter(serialDriver, memory)
+  const weibo = new WeiboAdapter(serialDriver, memory)
+  const xhs = new XhsAdapter(serialDriver, memory)
   // Alipay is an explicit non-goal (see README): no adapter is wired or
   // registered, and related pull requests are not accepted.
-  const registry = new AdapterRegistry()
-  registry.register(qq)
-  registry.register(douyin)
-  registry.register(game)
-  registry.register(bilibili)
-  registry.register(weibo)
-  registry.register(xhs)
+  const rawRegistry = new AdapterRegistry()
+  rawRegistry.register(qq)
+  rawRegistry.register(douyin)
+  rawRegistry.register(game)
+  rawRegistry.register(bilibili)
+  rawRegistry.register(weibo)
+  rawRegistry.register(xhs)
+  // Everything that dispatches by capability reaches the adapter through this
+  // decorator, so an outbound method is decided before it can touch the phone.
+  const registry = new GuardedAdapterRegistry(rawRegistry, {
+    decide: request => runMode.decide(request),
+  })
   const scheduler = new DailyScheduler({
     plans: config.schedules,
     run: async plan => {
@@ -465,6 +664,12 @@ export function apply(
   const httpNotifSource = new HttpNotificationSource(
     config.notifications.httpPort,
     resolve(notifDir, 'received.log'),
+    {
+      bindHost: config.notifications.bindHost,
+      token: config.notifications.token,
+      maxBodyBytes: config.notifications.maxBodyBytes,
+      allowedApps: config.notifications.whitelist,
+    },
   )
   const logcatNotifSource = new LogcatNotificationSource(
     adbPath,
@@ -504,6 +709,7 @@ export function apply(
     httpNotifSource,
     resolve(notifDir, 'cancel.log'),
     () => autonomyDriver?.onAllowEvent(),
+    config.notifications.failClosed,
   )
   if (config.notifications.enabled) {
     void notifications.start().catch(() => {})
@@ -552,12 +758,25 @@ export function apply(
       decision: AutonomyDecision,
       reason: string,
     ): Promise<void> {
-      console.warn(
-        `[autonomy] CONFIRM required: ${decision.app}/${decision.capability}/${decision.method} :: ${reason}`,
+      // A confirm decision used to become a console line and a memory entry,
+      // which nobody ever saw. It now becomes a durable inbox item that only
+      // the owner can approve (never the model).
+      const action = confirmations.enqueue({
+        app: decision.app ?? '',
+        capability: decision.capability ?? '',
+        method: decision.method ?? '',
+        args: decision.args ?? {},
+        reason,
+      })
+      console.log(
+        `[autonomy] queued for owner approval: ${action.id} ` +
+          `${action.app}/${action.capability}/${action.method}`,
       )
       await memory.remember({
         kind: 'event',
-        content: `autonomy confirm pending: ${decision.app}/${decision.capability}/${decision.method} | reason=${decision.reason}`,
+        content:
+          `autonomy confirmation queued ${action.id}: ` +
+          `${action.app}/${action.capability}/${action.method} | ${reason}`,
         tags: ['autonomy', 'confirm-pending'],
       })
     },
@@ -594,31 +813,20 @@ export function apply(
     } catch (err) {
       // A failing first tick must not take the plugin (and its tools) down.
       console.warn(
-        `[blue-fat-fish] autonomy start failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[dqy] autonomy start failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   }
 
-  // ---- Watch control: persisted run mode, hard guard, state machine, recipes
-  const stateStore = new FileStateStore(resolve(dataDir, 'state'))
-  const outboundGuard = new OutboundGuard({
-    allowedPeers: new Set<string>(config.control.allowedPeers),
-    maxLength: config.control.maxLength,
-    blockUrl: config.control.blockUrl,
-  })
-  const runMode = new RunMode(stateStore, outboundGuard, {
-    enabled: config.control.enabled,
-    dryRun: config.control.dryRun,
-    halted: false,
-  })
-  const messageState = new MessageStateStore(stateStore)
-
+  // ---- Watch control: recipes and the notification-driven DM pipeline.
+  // The policy state itself (run mode, guard, message journal, confirmation
+  // inbox) is constructed above the adapters so every caller shares it.
   const recipeDir = resolve(
     config.control.recipeDir ||
       resolve(packageRoot, 'assets/recipes'),
   )
   const recipes = new RecipeLoader(recipeDir).loadAll()
-  const recipeExecutor = new RecipeExecutor(driver)
+  const recipeExecutor = new RecipeExecutor(serialDriver)
   const dmSender = new RecipeDirectMessageSender(recipeExecutor, recipes)
   const dmWatch = new DmWatchPipeline(
     messageState,
@@ -711,7 +919,7 @@ export function apply(
   const httpController = new MirrorHttpController(
     hostWebServer,
     mirrorPanel,
-    '/fishline-mirror',
+    '/dqy-mirror',
   )
   const stopHttp = httpController.register()
 
@@ -737,10 +945,52 @@ export function apply(
     shutdownMirror()
   })
 
-  registerTools(ctx, {
+  // Owner-only approval: reaches the raw registry on purpose, after the policy
+  // has re-checked content rules with `humanApproved`. The model cannot call
+  // this path, it is reached only from the /confirm slash command.
+  const approveAction = async (action: PendingAction): Promise<string> => {
+    const args = action.args as { peer?: unknown; text?: unknown }
+    const decision = runMode.decide(
+      {
+        app: action.app,
+        surface: surfaceFor(action.capability, action.method),
+        peer: typeof args.peer === 'string' ? args.peer : undefined,
+        text: typeof args.text === 'string' ? args.text : '',
+      },
+      { humanApproved: true },
+    )
+    if (decision.verdict !== 'allow') {
+      throw new PolicyBlockedError(
+        'POLICY_BLOCKED',
+        decision.reasons.join('; '),
+        decision.reasons,
+      )
+    }
+    const capability = action.capability as CapabilityId
+    const capabilityObject = rawRegistry.getCapability<
+      Record<string, ((input: unknown) => Promise<unknown>) | undefined>
+    >(action.app, capability)
+    const fn = capabilityObject[action.method]
+    if (typeof fn !== 'function') {
+      throw new AdapterError(
+        'ACTION_NOT_FOUND',
+        `adapter ${action.app} has no callable ${action.method}`,
+      )
+    }
+    const raw = await fn.call(capabilityObject, action.args)
+    const result =
+      raw && typeof raw === 'object'
+        ? (raw as { ok?: boolean; detail?: string })
+        : undefined
+    return `${action.app}/${action.capability}/${action.method}: ${
+      result?.ok === false ? 'failed' : 'executed'
+    }${result?.detail ? ` - ${result.detail}` : ''}`
+  }
+
+  const services: FishServices = {
     loop,
     signin,
-    device: driver,
+    device: serialDriver,
     memory,
     vision,
     voice: routedVoice,
@@ -756,26 +1006,47 @@ export function apply(
     messageState,
     dmWatch,
     mirror: mirrorPanel,
-  })
+    confirmations,
+    toolTimeoutMs: config.toolTimeoutMs,
+    describePolicy: () => {
+      const snapshot = runMode.snapshot()
+      const pending = confirmations.list().length
+      const peers = config.control.allowedPeers.length
+      const auto = config.autonomy.autoActions.length
+      const lines = [
+        snapshot.halted
+          ? '发送：急停中（/watch resume 解除后仍需 /watch enable）'
+          : snapshot.enabled
+            ? snapshot.dryRun
+              ? '发送：已开启，但处于试运行（只记录、不真发）'
+              : '发送：已开启，会真实发送'
+            : '发送：关闭（这是默认值，/watch enable 开启）',
+        `收件人白名单：${peers} 个${peers === 0 ? '（空列表 = 谁都不能发）' : ''}`,
+        `待你批准的动作：${pending} 个${pending > 0 ? '（/confirm list 查看）' : ''}`,
+        `自主循环：${config.autonomy.enabled ? '运行中' : '关闭'}，可自动执行 ${auto} 条动作`,
+      ]
+      if (!snapshot.enabled && !snapshot.halted) {
+        lines.push(
+          '现在她只观察、写日记，不对外说话。要她开口：/watch enable 然后 /watch live。',
+        )
+      }
+      if (peers === 0) {
+        lines.push(
+          '白名单还是空的：先写 control.allowedPeers，格式 "包名:对方名"，' +
+            '例如 "com.tencent.mobileqq:张三"。',
+        )
+      }
+      if (snapshot.enabled && snapshot.dryRun) {
+        lines.push('试运行会把她想发的话记进记忆，确认没问题后再 /watch live。')
+      }
+      return lines.join('\n')
+    },
+  }
+  registerTools(ctx, services)
   registerCommands(ctx, {
-    loop,
-    signin,
-    device: driver,
-    memory,
-    vision,
-    voice: routedVoice,
-    qq,
-    douyin,
-    game,
-    scheduler,
-    adapters: registry,
-    adbPath: adbPath,
-    deviceSerial: serial,
-    notifications,
-    runMode,
-    messageState,
-    dmWatch,
-    mirror: mirrorPanel,
+    ...services,
+    confirmations,
+    approveAction,
   })
   registerPersona(ctx)
 }

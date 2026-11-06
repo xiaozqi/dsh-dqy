@@ -3,14 +3,15 @@ import {
   SignInService,
   flattenUiText,
 } from '../application/tasks/signin.task.js'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import { CAPABILITIES, type CapabilityId } from '../domain/adapter-types.js'
+import type { ConfirmationQueue } from '../application/control/confirmation-queue.js'
 import { DouyinService } from '../application/apps/douyin.service.js'
 import { GameService } from '../application/apps/game.service.js'
 import { QqService } from '../application/apps/qq.service.js'
 import { DailyScheduler } from '../application/scheduler/daily-scheduler.js'
 import { AdapterError } from '../domain/errors.js'
-import type { CapabilityId } from '../domain/adapter-types.js'
 import type { AppAdapterRegistry } from '../domain/ports/app-adapter.port.js'
 import type { SignInCapability } from '../domain/ports/capabilities/signin.port.js'
 import type { DevicePort } from '../domain/ports/device.port.js'
@@ -45,17 +46,38 @@ export interface FishServices {
   messageState: MessageStatePort
   dmWatch: DmWatchPipeline
   mirror: MirrorPanelService
+  confirmations: ConfirmationQueue
+  /** Default deadline for one tool call, from the plugin config. */
+  toolTimeoutMs: number
+  /** One-screen, user-facing answer to "why is she not talking?". */
+  describePolicy(): string
 }
 
 export function registerTools(
   ctx: Context,
   services: FishServices,
 ): void {
-  ctx.tools.register(
+  // Every tool gets a hard deadline and is declared non-concurrency-safe by
+  // default, because all of them can drive the one phone. Read-only tools opt
+  // into parallel execution below. A wedged adb or python call therefore ends
+  // as a typed timeout instead of a model step that hangs forever.
+  const register = (
+    definition: ToolDefinition,
+    concurrencySafe = false,
+  ): void => {
+    ctx.tools.register({
+      ...definition,
+      timeoutMs: definition.timeoutMs ?? services.toolTimeoutMs,
+      isConcurrencySafe:
+        definition.isConcurrencySafe ?? (() => concurrencySafe),
+    })
+  }
+
+  register(
     defineTool({
       name: 'fish_goal',
       description:
-        'Give Blue Fat Fish an open-ended goal on the Android phone; it plans and executes autonomously.',
+        'Give DQY an open-ended goal on the Android phone; it plans and executes autonomously.',
       parameters: {
         goal: {
           type: 'string',
@@ -87,7 +109,7 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_signin',
       description:
@@ -162,7 +184,7 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_observe',
       description:
@@ -198,10 +220,10 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_remember',
-      description: 'Store a long-term fact in Blue Fat Fish memory.',
+      description: 'Store a long-term fact in DQY memory.',
       parameters: {
         content: {
           type: 'string',
@@ -244,11 +266,11 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_recall',
       description:
-        'Search Blue Fat Fish memory for relevant facts and events.',
+        'Search DQY memory for relevant facts and events.',
       parameters: {
         query: {
           type: 'string',
@@ -287,9 +309,10 @@ export function registerTools(
         return services.memory.recall(args.query, 5)
       },
     }),
+    true,
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_status',
       description:
@@ -331,7 +354,7 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_apps',
       description:
@@ -353,6 +376,7 @@ export function registerTools(
             displayName: a.displayName,
             packageName: a.packageName,
             capabilities: [...a.capabilities],
+            actions: actionCatalog([...a.capabilities]),
             todoCount: a.todos.length,
           })),
           todos: services.adapters.listTodos().map(t => ({
@@ -364,16 +388,16 @@ export function registerTools(
         }
       },
     }),
+    true,
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_app_run',
       description:
         'Run one capability action on a registered app adapter. ' +
-        'Capability-action pairs: message: sendMessage/sendImage/readConversation; ' +
-        'comment: comment/replyComment/browseComments; social: mention; live: watchLive; ' +
-        'feed: browseFeed; signin: signIn; pet: feedPet; game: runGame.',
+        'Call fish_apps first: it lists every action with the exact parameter ' +
+        'names it accepts and the app id to pass here.',
       parameters: {
         app: {
           type: 'string',
@@ -383,19 +407,18 @@ export function registerTools(
         capability: {
           type: 'string',
           required: true,
-          description:
-            'Capability id: message/comment/social/live/feed/signin/pet/game',
+          description: 'Capability id (see fish_apps)',
         },
         action: {
           type: 'string',
           required: true,
-          description: 'Action name within the capability',
+          description: 'Action name within the capability (see fish_apps)',
         },
         params: {
           type: 'object',
           additionalProperties: true,
           description:
-            'Action parameters (peer/text/localImagePath/target/friend/count/...)',
+            'Action parameters, exactly as listed by fish_apps for that action',
         },
       },
       output: {
@@ -420,52 +443,60 @@ export function registerTools(
         ],
       },
       async execute(args): Promise<any> {
-        const app = String(args.app)
+        const requestedApp = String(args.app)
         const capability = String(args.capability)
         const action = String(args.action)
-        const methodName = CAPABILITY_ACTIONS[capability]?.[action]
-        if (!methodName) {
+        if (!(CAPABILITIES as readonly string[]).includes(capability)) {
           throw new AdapterError(
-            'ACTION_NOT_FOUND',
-            `no action ${capability}/${action} in the dispatch table`,
+            'BAD_CAPABILITY',
+            `unknown capability ${capability}; call fish_apps for the catalog`,
           )
         }
+        const spec = actionSpec(capability as CapabilityId, action)
+        if (!spec) {
+          throw new AdapterError(
+            'ACTION_NOT_FOUND',
+            `no action ${capability}/${action}; call fish_apps for the catalog`,
+          )
+        }
+        const app = resolveAdapterId(services.adapters, requestedApp)
         const adapter = services.adapters.getCapability<Record<string, unknown>>(
           app,
           capability as CapabilityId,
         )
-        const fn = adapter[methodName] as
-          | ((input: Record<string, unknown>) => Promise<{
-              ok: boolean
-              detail: string
-              sent?: boolean
-              data?: Record<string, unknown>
-            }>)
-          | undefined
+        const fn = adapter[spec.method]
         if (typeof fn !== 'function') {
           throw new AdapterError(
             'ACTION_NOT_FOUND',
-            `adapter ${app} has no callable ${methodName}`,
+            `adapter ${app} has no callable ${spec.method}`,
           )
         }
-        let params: Record<string, unknown> = {}
-        if (
-          typeof args.params === 'object' &&
-          args.params !== null &&
-          !Array.isArray(args.params)
-        ) {
-          params = args.params as Record<string, unknown>
-        }
+        const params = normalizeParams(spec, readParams(args.params))
         try {
-          const result = await fn.call(adapter, params)
+          // Some capability methods take positional arguments
+          // (readConversation(peer, limit), browseComments(limit)); passing the
+          // params object positionally used to make `peer` an object and the
+          // read silently returned nothing.
+          const raw = spec.positional
+            ? await (
+                fn as (...positional: unknown[]) => Promise<unknown>
+              ).apply(
+                adapter,
+                spec.positional.map(key => params[key]),
+              )
+            : await (fn as (input: unknown) => Promise<unknown>).call(
+                adapter,
+                params,
+              )
+          const result = normalizeAdapterResult(raw)
           return {
             app,
             capability,
             action,
             ok: result.ok,
             detail: result.detail,
-            sent: result.sent ?? false,
-            data: result.data ?? {},
+            sent: result.sent,
+            data: result.data,
           }
         } catch (err) {
           return {
@@ -482,7 +513,7 @@ export function registerTools(
     }),
   )
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: 'fish_notifications',
       description:
@@ -516,6 +547,48 @@ export function registerTools(
         }
       },
     }),
+    true,
+  )
+
+  register(
+    defineTool({
+      name: 'fish_confirmations',
+      description:
+        'List the actions waiting for the phone owner to approve, plus the ' +
+        'current send mode. DQY cannot approve her own actions: ' +
+        'report the pending ids to the owner, who decides with /confirm.',
+      parameters: {},
+      output: {
+        schema: { type: 'json' },
+        render: (_args, value) => [
+          {
+            type: 'text',
+            text: renderConfirmations(
+              value as unknown as ConfirmationView,
+            ),
+          },
+        ],
+      },
+      async execute() {
+        const snapshot = services.runMode.snapshot()
+        return {
+          enabled: snapshot.enabled,
+          dryRun: snapshot.dryRun,
+          halted: snapshot.halted,
+          pending: services.confirmations.list().map(action => ({
+            id: action.id,
+            app: action.app,
+            capability: action.capability,
+            method: action.method,
+            reason: action.reason,
+            args: JSON.stringify(action.args).slice(0, 400),
+            createdAt: new Date(action.createdAt).toISOString(),
+            expiresAt: new Date(action.expiresAt).toISOString(),
+          })),
+        }
+      },
+    }),
+    true,
   )
 
   registerAppTools(ctx, services)
@@ -543,23 +616,176 @@ function renderSignin(value: Record<string, unknown>): string {
   return `autonomous: ${value.status} - ${value.detail}`
 }
 
-const CAPABILITY_ACTIONS: Record<string, Record<string, string>> = {
-  message: {
-    sendMessage: 'sendMessage',
-    sendImage: 'sendImage',
-    readConversation: 'readConversation',
-  },
-  comment: {
-    comment: 'comment',
-    replyComment: 'replyComment',
-    browseComments: 'browseComments',
-  },
-  social: { mention: 'mention' },
-  live: { watchLive: 'watchLive' },
-  feed: { browseFeed: 'browseFeed' },
-  signin: { signIn: 'signIn' },
-  pet: { feedPet: 'feedPet' },
-  game: { runGame: 'runGame' },
+type ActionSpec = {
+  action: string
+  method: string
+  params: string[]
+  /** Positional arguments in call order; absent for object-style inputs. */
+  positional?: string[]
+}
+
+// Single source of truth for what fish_app_run can dispatch, what fish_apps
+// advertises, and how parameters map onto the capability method.
+const ACTION_CATALOG: Record<CapabilityId, ActionSpec[]> = {
+  message: [
+    { action: 'sendMessage', method: 'sendMessage', params: ['peer', 'text'] },
+    {
+      action: 'sendImage',
+      method: 'sendImage',
+      params: ['peer', 'localImagePath', 'caption'],
+    },
+    {
+      action: 'readConversation',
+      method: 'readConversation',
+      params: ['peer', 'limit'],
+      positional: ['peer', 'limit'],
+    },
+  ],
+  comment: [
+    { action: 'comment', method: 'comment', params: ['text', 'target'] },
+    { action: 'replyComment', method: 'replyComment', params: ['text', 'target'] },
+    {
+      action: 'browseComments',
+      method: 'browseComments',
+      params: ['limit'],
+      positional: ['limit'],
+    },
+  ],
+  social: [
+    { action: 'mention', method: 'mention', params: ['friend', 'text', 'context'] },
+  ],
+  moment: [
+    { action: 'publishMoment', method: 'publishMoment', params: ['text', 'visibleTo'] },
+  ],
+  live: [{ action: 'watchLive', method: 'watchLive', params: ['anchor', 'durationMs'] }],
+  feed: [
+    {
+      action: 'browseFeed',
+      method: 'browseFeed',
+      params: ['count', 'watchMs', 'likeKeywords'],
+    },
+  ],
+  signin: [{ action: 'signIn', method: 'signIn', params: [] }],
+  pet: [{ action: 'feedPet', method: 'feedPet', params: [] }],
+  game: [
+    { action: 'runGame', method: 'runGame', params: ['game', 'rounds', 'threshold'] },
+  ],
+}
+
+function actionSpec(
+  capability: CapabilityId,
+  action: string,
+): ActionSpec | undefined {
+  return ACTION_CATALOG[capability]?.find(item => item.action === action)
+}
+
+function actionCatalog(
+  capabilities: CapabilityId[],
+): Record<string, ActionSpec[]> {
+  const out: Record<string, ActionSpec[]> = {}
+  for (const capability of capabilities) {
+    out[capability] = ACTION_CATALOG[capability] ?? []
+  }
+  return out
+}
+
+function resolveAdapterId(
+  registry: AppAdapterRegistry,
+  requested: string,
+): string {
+  const name = requested.trim()
+  try {
+    return registry.get(name).id
+  } catch {
+    const byName = registry.list().find(
+      adapter => adapter.displayName === name,
+    )
+    if (byName) {
+      return byName.id
+    }
+    throw new AdapterError(
+      'ADAPTER_NOT_FOUND',
+      `no app adapter registered for: ${requested}; call fish_apps for the ids`,
+    )
+  }
+}
+
+function readParams(input: unknown): Record<string, unknown> {
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    return input as Record<string, unknown>
+  }
+  return {}
+}
+
+function normalizeParams(
+  spec: ActionSpec,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...params }
+  // Models emit `peer` for every person-targeted action, but the social
+  // capability names its field `friend`; accept both instead of failing.
+  if (
+    spec.method === 'mention' &&
+    out.friend === undefined &&
+    out.peer !== undefined
+  ) {
+    out.friend = out.peer
+  }
+  if (
+    spec.method === 'publishMoment' &&
+    out.text === undefined &&
+    out.content !== undefined
+  ) {
+    out.text = out.content
+  }
+  return out
+}
+
+interface NormalizedAdapterResult {
+  ok: boolean
+  detail: string
+  sent: boolean
+  data: Record<string, unknown>
+}
+
+function normalizeAdapterResult(raw: unknown): NormalizedAdapterResult {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>
+    if (typeof record.ok === 'boolean') {
+      const data =
+        record.data &&
+        typeof record.data === 'object' &&
+        !Array.isArray(record.data)
+          ? (record.data as Record<string, unknown>)
+          : {}
+      return {
+        ok: record.ok,
+        detail: typeof record.detail === 'string' ? record.detail : '',
+        // Adapters historically put `sent` inside data; honour both so a real
+        // transmission is never reported as sent=false.
+        sent: record.sent === true || data.sent === true,
+        data,
+      }
+    }
+    // Read-style results (ConversationPreview, {items}) carry no ok flag; a
+    // resolved call is a completed read.
+    let detail = 'read completed'
+    let data: Record<string, unknown> = {}
+    try {
+      data = record
+      detail = `read: ${JSON.stringify(record).slice(0, 400)}`
+    } catch {
+      // Circular payloads keep the generic detail.
+    }
+    return { ok: true, detail, sent: false, data }
+  }
+  return {
+    ok: true,
+    detail:
+      raw === undefined || raw === null ? '(no return value)' : String(raw),
+    sent: false,
+    data: {},
+  }
 }
 
 interface AppListView {
@@ -568,6 +794,7 @@ interface AppListView {
     displayName: string
     packageName: string
     capabilities: string[]
+    actions: Record<string, ActionSpec[]>
     todoCount: number
   }>
   todos: unknown[]
@@ -621,10 +848,22 @@ function renderNotifications(value: NotificationView): string {
 }
 
 function renderApps(value: AppListView): string {
-  const lines = value.apps.map(
-    a =>
-      `${a.id} (${a.displayName}, ${a.packageName}): [${a.capabilities.join(', ')}] todo ${a.todoCount}`,
-  )
+  const lines: string[] = []
+  for (const app of value.apps) {
+    lines.push(
+      `${app.id} (${app.displayName}, ${app.packageName}) todo ${app.todoCount}`,
+    )
+    for (const [capability, actions] of Object.entries(app.actions ?? {})) {
+      const rendered = actions
+        .map(spec =>
+          spec.params.length > 0
+            ? `${spec.action}(${spec.params.join(', ')})`
+            : `${spec.action}()`,
+        )
+        .join(' | ')
+      lines.push(`  ${capability}: ${rendered}`)
+    }
+  }
   if (value.todos.length > 0) {
     lines.push('todos:')
     for (const todo of value.todos as Array<{ app: string; capability: string; feature: string; note: string }>) {
@@ -640,4 +879,40 @@ function renderAppRun(value: AppRunView): string {
   if (value.sent !== undefined) text += `, sent=${value.sent}`
   if (value.data) text += `, data=${JSON.stringify(value.data)}`
   return text
+}
+
+interface ConfirmationView {
+  enabled: boolean
+  dryRun: boolean
+  halted: boolean
+  pending: Array<{
+    id: string
+    app: string
+    capability: string
+    method: string
+    reason: string
+    args: string
+    createdAt: string
+    expiresAt: string
+  }>
+}
+
+function renderConfirmations(value: ConfirmationView): string {
+  const lines = [
+    `send mode: enabled=${value.enabled} dryRun=${value.dryRun} halted=${value.halted}`,
+  ]
+  if (value.pending.length === 0) {
+    lines.push('nothing is waiting for approval')
+    return lines.join('\n')
+  }
+  lines.push(`${value.pending.length} action(s) waiting for the owner:`)
+  for (const action of value.pending) {
+    lines.push(
+      `- ${action.id} ${action.app}/${action.capability}/${action.method} ` +
+        `(${action.reason}) args=${JSON.stringify(action.args).slice(0, 200)} ` +
+        `expires ${action.expiresAt}`,
+    )
+  }
+  lines.push('The owner can run /confirm list, /confirm approve <id> or /confirm deny <id>.')
+  return lines.join('\n')
 }

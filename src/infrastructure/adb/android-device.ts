@@ -7,6 +7,13 @@ import {
 import { join } from 'node:path'
 import { DeviceError, UiNotFoundError } from '../../domain/errors.js'
 import {
+  assertPackageName,
+  encodeAdbInputText,
+  sanitizeShellText,
+  shQuote,
+  toBase64,
+} from './shell-quote.js'
+import {
   matches,
   type UiDriverPort,
   type UiMatcher,
@@ -28,7 +35,7 @@ const KEY_CODES: Record<string, number> = {
 }
 
 const ADB_KEYBOARD_IME = 'com.android.adbkeyboard/.AdbIME'
-const REMOTE_DUMP_PATH = '/sdcard/blue-fat-fish-dump.xml'
+const REMOTE_DUMP_PATH = '/sdcard/dqy-dump.xml'
 const MAX_CAPTURES = 5
 
 function delay(ms: number): Promise<void> {
@@ -36,15 +43,11 @@ function delay(ms: number): Promise<void> {
 }
 
 function encodeInput(text: string): string {
-  return text
-    .replace(/%/g, '%25')
-    .replace(/ /g, '%s')
-    .replace(/"/g, '\\"')
-    .replace(/&/g, '\\&')
-    .replace(/</g, '\\<')
-    .replace(/>/g, '\\>')
-    .replace(/;/g, '\\;')
-    .replace(/\|/g, '\\|')
+  // Delegated to the shared quoting helper: the old inline version escaped
+  // `" & < > ; |` but left `$`, backticks, quotes and newlines live, which the
+  // device shell then expanded. Input is single-quoted and `input text`'s own
+  // `%s`/`%25` escapes are applied inside the quotes.
+  return encodeAdbInputText(sanitizeShellText(text))
 }
 
 export class AndroidDevice implements UiDriverPort {
@@ -185,15 +188,19 @@ export class AndroidDevice implements UiDriverPort {
       // Wipe any restored draft first so we replace, not append.
       await this.adb.run(['shell', 'am', 'broadcast', '-a', 'ADB_CLEAR_TEXT'])
       await delay(400)
+      // Base64 is shell-safe by construction and ADBKeyBoard decodes it back
+      // to the exact UTF-8 text, spaces and punctuation included. The previous
+      // `--es msg <text>` form was unquoted: spaces split into separate argv
+      // entries (only the first word arrived) and shell metacharacters ran.
       await this.adb.run([
         'shell',
         'am',
         'broadcast',
         '-a',
-        'ADB_INPUT_TEXT',
+        'ADB_INPUT_B64',
         '--es',
         'msg',
-        text,
+        toBase64(sanitizeShellText(text)),
       ])
       await delay(500)
     } finally {
@@ -211,11 +218,14 @@ export class AndroidDevice implements UiDriverPort {
   }
 
   async openApp(packageName: string): Promise<void> {
+    // Package names are validated, not quoted: `monkey -p` must never receive
+    // free-form text that a model produced.
+    const safe = assertPackageName(packageName)
     await this.adb.run([
       'shell',
       'monkey',
       '-p',
-      packageName,
+      safe,
       '-c',
       'android.intent.category.LAUNCHER',
       '1',
@@ -303,14 +313,14 @@ export class AndroidDevice implements UiDriverPort {
     localPath: string,
     remotePath: string,
   ): Promise<void> {
-    await this.adb.run(['push', localPath, remotePath])
+    await this.adb.run(['push', localPath, shQuote(remotePath)])
   }
 
   async pullFile(
     remotePath: string,
     localPath: string,
   ): Promise<void> {
-    await this.adb.run(['pull', remotePath, localPath])
+    await this.adb.run(['pull', shQuote(remotePath), localPath])
   }
 
   async playAudio(remotePath: string): Promise<void> {
@@ -322,7 +332,7 @@ export class AndroidDevice implements UiDriverPort {
       '-a',
       'android.intent.action.VIEW',
       '-d',
-      `file://${encoded}`,
+      shQuote(`file://${encoded}`),
       '-t',
       'audio/*',
     ])

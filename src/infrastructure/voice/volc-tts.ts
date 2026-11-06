@@ -50,7 +50,7 @@ export class VolcTts {
 
   private async submit(text: string, speaker: string): Promise<string> {
     const body = {
-      user: { uid: 'dsh-blue-fat-fish' },
+      user: { uid: 'dsh-dqy' },
       unique_id: randomUUID(),
       req_params: {
         text,

@@ -1,16 +1,15 @@
-import { appendFileSync, mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type {
   IncomingMessage,
   Server,
   ServerResponse,
 } from 'node:http'
-import { dirname } from 'node:path'
 import type { NotificationEvent } from '../../domain/notification-types.js'
 import type {
   NotificationCancelSink,
   NotificationSource,
 } from '../../domain/ports/notification.port.js'
+import { createFileLogger, type LogFn } from '../file-logger.js'
 
 interface NotifyBody {
   app?: unknown
@@ -18,7 +17,26 @@ interface NotifyBody {
   text?: unknown
   when?: unknown
   id?: unknown
+  importance?: unknown
 }
+
+export interface HttpNotificationOptions {
+  /**
+   * Interface to bind. Loopback by default: `adb reverse` already forwards the
+   * phone to the host loopback, so a wider bind only lets the LAN forge
+   * notifications into an agent that can send messages.
+   */
+  bindHost?: string
+  /** When set, the bridge must send `x-fish-token` with the same value. */
+  token?: string
+  maxBodyBytes?: number
+  /** App names allowed to inject events; empty means "any". */
+  allowedApps?: readonly string[]
+  logger?: LogFn
+}
+
+const MAX_TEXT = 4000
+const DEFAULT_MAX_BODY = 64 * 1024
 
 export class HttpNotificationSource
   implements NotificationSource, NotificationCancelSink
@@ -27,12 +45,24 @@ export class HttpNotificationSource
   private server: Server | null = null
   private readonly listeners = new Set<(e: NotificationEvent) => void>()
   private readonly pendingCancels: string[] = []
+  private readonly logger: LogFn
+  private readonly bindHost: string
+  private readonly token: string
+  private readonly maxBodyBytes: number
+  private readonly allowedApps: Set<string>
   private seq = 0
 
   constructor(
     private readonly port = 14123,
-    private readonly logPath: string,
-  ) {}
+    logPath: string,
+    options: HttpNotificationOptions = {},
+  ) {
+    this.bindHost = options.bindHost ?? '127.0.0.1'
+    this.token = options.token ?? ''
+    this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY
+    this.allowedApps = new Set(options.allowedApps ?? [])
+    this.logger = options.logger ?? createFileLogger(logPath)
+  }
 
   get connected(): boolean {
     return this.server?.listening ?? false
@@ -43,14 +73,13 @@ export class HttpNotificationSource
       return
     }
     try {
-      mkdirSync(dirname(this.logPath), { recursive: true })
       await new Promise<void>(resolve => {
         const server = createServer((req, res) => this.handle(req, res))
         server.once('error', err => {
           this.lastError = (err as Error).message
           resolve()
         })
-        server.listen(this.port, '0.0.0.0', () => {
+        server.listen(this.port, this.bindHost, () => {
           server.removeAllListeners('error')
           this.server = server
           this.lastError = null
@@ -104,14 +133,44 @@ export class HttpNotificationSource
       res.writeHead(404).end()
       return
     }
+    if (this.token && String(req.headers['x-fish-token'] ?? '') !== this.token) {
+      res.writeHead(403).end()
+      return
+    }
     const chunks: Buffer[] = []
-    req.on('data', chunk => chunks.push(Buffer.from(chunk as Buffer)))
+    let size = 0
+    let tooLarge = false
+    req.on('data', chunk => {
+      if (tooLarge) {
+        return
+      }
+      const buffer = Buffer.from(chunk as Buffer)
+      size += buffer.length
+      if (size > this.maxBodyBytes) {
+        tooLarge = true
+        chunks.length = 0
+        res.writeHead(413, { 'content-type': 'application/json' }).end(
+          '{"ok":false,"error":"body too large"}',
+        )
+        return
+      }
+      chunks.push(buffer)
+    })
     req.on('end', () => {
+      if (tooLarge) {
+        return
+      }
       try {
         const body = JSON.parse(
           Buffer.concat(chunks).toString('utf8'),
         ) as NotifyBody
         const event = this.toEvent(body)
+        if (!event) {
+          res.writeHead(400, { 'content-type': 'application/json' }).end(
+            '{"ok":false,"error":"app not allowed"}',
+          )
+          return
+        }
         this.appendLog(event)
         for (const cb of this.listeners) {
           try {
@@ -132,26 +191,35 @@ export class HttpNotificationSource
     })
   }
 
-  private toEvent(body: NotifyBody): NotificationEvent {
+  private toEvent(body: NotifyBody): NotificationEvent | null {
+    const app = typeof body.app === 'string' ? body.app.slice(0, 200) : ''
+    if (this.allowedApps.size > 0 && !this.allowedApps.has(app)) {
+      return null
+    }
     const id =
       typeof body.id === 'string' && body.id
-        ? body.id
+        ? body.id.slice(0, 200)
         : `${Date.now()}-${this.seq++}`
     const when = typeof body.when === 'number' ? body.when : Date.now()
+    const importance =
+      typeof body.importance === 'number' &&
+      Number.isFinite(body.importance)
+        ? body.importance
+        : 2
     return {
       id,
-      app: typeof body.app === 'string' ? body.app : '',
-      title: typeof body.title === 'string' ? body.title : '',
-      text: typeof body.text === 'string' ? body.text : '',
+      app,
+      title: typeof body.title === 'string' ? body.title.slice(0, MAX_TEXT) : '',
+      text: typeof body.text === 'string' ? body.text.slice(0, MAX_TEXT) : '',
       when,
-      importance: 2,
+      importance,
       source: 'http',
     }
   }
 
   private appendLog(event: NotificationEvent): void {
     try {
-      appendFileSync(this.logPath, JSON.stringify(event) + '\n', 'utf8')
+      this.logger(JSON.stringify(event))
     } catch {
       /* logging failure must not break delivery */
     }
