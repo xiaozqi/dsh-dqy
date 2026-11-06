@@ -6,7 +6,6 @@ import z from '@deepseek-ai/schemastery'
 import { AgentLoop } from './application/agent-loop.js'
 import { AdapterRegistry } from './application/adapters/adapter-registry.js'
 import { PriorityTapPolicy } from './application/apps/game-policy.js'
-import { AlipayAdapter } from './application/apps/alipay.adapter.js'
 import { BilibiliAdapter } from './application/apps/bilibili.adapter.js'
 import { DouyinService } from './application/apps/douyin.service.js'
 import { GameService } from './application/apps/game.service.js'
@@ -45,6 +44,19 @@ import { ReverseTunnelKeepAlive } from './infrastructure/notifications/reverse-t
 import { AdbClient } from './infrastructure/adb/adb-client.js'
 import { AndroidDevice } from './infrastructure/adb/android-device.js'
 import { resolveDeviceSerial } from './infrastructure/adb/resolve-device.js'
+import { resolveAdbPath } from './infrastructure/adb/resolve-adb.js'
+import { resolveScrcpyPath } from './infrastructure/mirror/resolve-scrcpy.js'
+import { ScrcpyMirror } from './infrastructure/mirror/scrcpy-mirror.js'
+import { FileMirrorConfigStore } from './infrastructure/mirror/file-mirror-config.js'
+import { NodeShell } from './infrastructure/node-shell.js'
+import { createFileLogger } from './infrastructure/file-logger.js'
+import {
+  CordisWebServer,
+  type HostWebServer,
+} from './infrastructure/web/cordis-web-server.js'
+import { MirrorHttpController } from './infrastructure/web/mirror-http.controller.js'
+import { MirrorPanelService } from './application/mirror/mirror-panel.service.js'
+import type { MirrorConfig } from './domain/mirror-types.js'
 import { AdbUiDriver } from './infrastructure/drivers/adb-ui-driver.js'
 import { FallbackUiDriver } from './infrastructure/drivers/fallback-ui-driver.js'
 import { Uiautomator2Driver } from './infrastructure/drivers/uiautomator2-driver.js'
@@ -59,9 +71,17 @@ import { VolcTts } from './infrastructure/voice/volc-tts.js'
 import { registerCommands } from './interface/commands.js'
 import { PERSONA, registerPersona } from './interface/prompt.js'
 import { registerTools } from './interface/tools.js'
+import { FileStateStore } from './infrastructure/state/file-state-store.js'
+import { OutboundGuard } from './application/control/outbound-guard.js'
+import { RunMode } from './application/control/run-mode.js'
+import { MessageStateStore } from './application/control/message-state-store.js'
+import { DmWatchPipeline } from './application/control/dm-watch-pipeline.js'
+import { RecipeExecutor } from './application/recipes/recipe-executor.js'
+import { RecipeLoader } from './infrastructure/recipes/recipe-loader.js'
+import { RecipeDirectMessageSender } from './infrastructure/recipes/recipe-dm-sender.js'
 
 export const name = 'blue-fat-fish'
-export const inject = ['tools']
+export const inject = ['tools', 'webServer']
 
 const stepSchema = z.object({
   kind: z.string().required(),
@@ -102,6 +122,7 @@ const defaultJunkRules: {
 
 export const Config = z.object({
   adbPath: z.string().default('adb'),
+  scrcpyPath: z.string().default('scrcpy'),
   deviceSerial: z.string().default(''),
   llmBaseUrl: z.string().default('https://api.deepseek.com'),
   llmModel: z.string().default('deepseek-chat'),
@@ -155,6 +176,16 @@ export const Config = z.object({
       dedupeWindowMs: z.number().default(600000),
     })
     .default({}),
+  mirror: z
+    .object({
+      alwaysOnTop: z.boolean().default(true),
+      windowWidth: z.number().default(460),
+      turnScreenOff: z.boolean().default(true),
+      audio: z.boolean().default(false),
+      graceMs: z.number().default(1200),
+      reconnect: z.boolean().default(true),
+    })
+    .default({}),
   autonomy: z
     .object({
       enabled: z.boolean().default(true),
@@ -190,6 +221,19 @@ export const Config = z.object({
           'game/runGame',
           'live/watchLive',
         ]),
+    })
+    .default({}),
+  // Watch control: safe defaults (sending disabled, dry run on). These drive
+  // the run-mode gate and the hard outbound guard for the DM pipeline.
+  control: z
+    .object({
+      enabled: z.boolean().default(false),
+      dryRun: z.boolean().default(true),
+      // Entries are `${packageName}:${peer}`; an empty list blocks every peer.
+      allowedPeers: z.array(z.string()).default([]),
+      maxLength: z.number().default(500),
+      blockUrl: z.boolean().default(true),
+      recipeDir: z.string().default(''),
     })
     .default({}),
 })
@@ -275,8 +319,11 @@ export function apply(
     'resources/python/gptsovits_synth.py',
   )
 
-  const serial = resolveSerialOrEmpty(config.adbPath, config.deviceSerial)
-  const adb = new AdbClient(config.adbPath, serial || undefined)
+  // Resolve the adb binary first: the default 'adb' is not on PATH on this
+  // machine, so discovery also checks the Android SDK and winget directories.
+  const adbPath = resolveAdbPath(config.adbPath)
+  const serial = resolveSerialOrEmpty(adbPath, config.deviceSerial)
+  const adb = new AdbClient(adbPath, serial || undefined)
   const device = new AndroidDevice(adb, dataDir)
   const memory = new JsonMemory(resolve(dataDir, 'memory.json'))
   const llmApiKey =
@@ -308,7 +355,7 @@ export function apply(
   const u2 = new Uiautomator2Driver(
     config.pythonPath,
     u2Worker,
-    config.adbPath,
+    adbPath,
     serial,
     resolve(dataDir, 'u2'),
   )
@@ -384,7 +431,8 @@ export function apply(
   const bilibili = new BilibiliAdapter(driver, memory)
   const weibo = new WeiboAdapter(driver, memory)
   const xhs = new XhsAdapter(driver, memory)
-  const alipay = new AlipayAdapter(driver, memory)
+  // Alipay is an explicit non-goal (see README): no adapter is wired or
+  // registered, and related pull requests are not accepted.
   const registry = new AdapterRegistry()
   registry.register(qq)
   registry.register(douyin)
@@ -392,7 +440,6 @@ export function apply(
   registry.register(bilibili)
   registry.register(weibo)
   registry.register(xhs)
-  registry.register(alipay)
   const scheduler = new DailyScheduler({
     plans: config.schedules,
     run: async plan => {
@@ -419,11 +466,11 @@ export function apply(
     resolve(notifDir, 'received.log'),
   )
   const logcatNotifSource = new LogcatNotificationSource(
-    config.adbPath,
+    adbPath,
     serial,
   )
   const notifTunnel = new ReverseTunnelKeepAlive(
-    config.adbPath,
+    adbPath,
     serial,
   )
   const notifRules = (config.notifications.rules ?? []).map(
@@ -551,6 +598,143 @@ export function apply(
     }
   }
 
+  // ---- Watch control: persisted run mode, hard guard, state machine, recipes
+  const stateStore = new FileStateStore(resolve(dataDir, 'state'))
+  const outboundGuard = new OutboundGuard({
+    allowedPeers: new Set<string>(config.control.allowedPeers),
+    maxLength: config.control.maxLength,
+    blockUrl: config.control.blockUrl,
+  })
+  const runMode = new RunMode(stateStore, outboundGuard, {
+    enabled: config.control.enabled,
+    dryRun: config.control.dryRun,
+    halted: false,
+  })
+  const messageState = new MessageStateStore(stateStore)
+
+  const recipeDir = resolve(
+    config.control.recipeDir ||
+      resolve(packageRoot, 'assets/recipes'),
+  )
+  const recipes = new RecipeLoader(recipeDir).loadAll()
+  const recipeExecutor = new RecipeExecutor(driver)
+  const dmSender = new RecipeDirectMessageSender(recipeExecutor, recipes)
+  const dmWatch = new DmWatchPipeline(
+    messageState,
+    runMode,
+    llm,
+    dmSender,
+    { dedupeWindowMs: config.notifications.dedupeWindowMs },
+  )
+
+  // Every allowed notification enters the watch pipeline. The pipeline is
+  // idempotent, so replayed notifications never produce a second reply.
+  notifications.onEvent(decision => {
+    if (decision.action === 'allow') {
+      void dmWatch.handle(decision.event).catch(() => {})
+    }
+  })
+
+  // Mirror panel subsystem: a file-backed config, a scrcpy process adapter and
+  // the application service, exposed over the host web server together with an
+  // injected in-page panel. Every piece depends on domain ports, never directly
+  // on the untyped host runtime.
+  const mirrorConfigPath = resolve(dataDir, 'mirror-config.json')
+  const mirrorLogPath = resolve(dataDir, 'mirror.log')
+  const panelAssetPath = resolve(
+    packageRoot,
+    'resources',
+    'mirror',
+    'panel.js',
+  )
+  const pluginVersion = (() => {
+    try {
+      return String(
+        JSON.parse(
+          readFileSync(resolve(packageRoot, 'package.json'), 'utf8'),
+        ).version ?? '0.0.0',
+      )
+    } catch {
+      return '0.0.0'
+    }
+  })()
+
+  const initialMirrorConfig: MirrorConfig = {
+    serial,
+    adb: '',
+    scrcpy: '',
+    autoStart: false,
+    alwaysOnTop: config.mirror.alwaysOnTop,
+    windowWidth: config.mirror.windowWidth,
+    turnScreenOff: config.mirror.turnScreenOff,
+    audio: config.mirror.audio,
+    graceMs: config.mirror.graceMs,
+    reconnect: config.mirror.reconnect,
+    pin: '',
+  }
+
+  const mirrorShell = new NodeShell()
+  const mirrorConfigStore = new FileMirrorConfigStore(
+    mirrorConfigPath,
+    initialMirrorConfig,
+  )
+  const mirrorLogger = createFileLogger(mirrorLogPath)
+
+  // Holder breaks the circular reference: the process adapter reports exits to
+  // the panel service, which is constructed immediately afterwards.
+  let panelHolder: MirrorPanelService
+  const mirrorProcess = new ScrcpyMirror({
+    resolveAdb: resolveAdbPath,
+    resolveScrcpy: resolveScrcpyPath,
+    onExit: (code, byUser) => panelHolder.handleExit(code, byUser),
+  })
+  const mirrorPanel = new MirrorPanelService({
+    configStore: mirrorConfigStore,
+    mirror: mirrorProcess,
+    shell: mirrorShell,
+    resolveAdb: resolveAdbPath,
+    resolveScrcpy: resolveScrcpyPath,
+    pluginVersion,
+    logPath: mirrorLogPath,
+    panelAssetPath,
+    logger: mirrorLogger,
+  })
+  panelHolder = mirrorPanel
+
+  // The host web server is injected at runtime without a published type, so it
+  // is adapted to the domain WebServerPort behind a structural cast.
+  const hostWebServer = new CordisWebServer(
+    (ctx as unknown as { webServer: HostWebServer }).webServer,
+  )
+  const httpController = new MirrorHttpController(
+    hostWebServer,
+    mirrorPanel,
+    '/fishline-mirror',
+  )
+  const stopHttp = httpController.register()
+
+  // Auto-start mirroring after a short delay when the config requests it.
+  if (mirrorConfigStore.load().autoStart) {
+    const autoTimer = setTimeout(() => {
+      mirrorPanel.start().catch(() => {})
+    }, 2500)
+    ctx.effect(() => () => clearTimeout(autoTimer))
+  }
+
+  // Never leave scrcpy or the HTTP routes orphaned on shutdown.
+  const shutdownMirror = (): void => {
+    stopHttp()
+    mirrorPanel.stop().catch(() => {})
+  }
+  const onProcessExit = (): void => {
+    stopHttp()
+  }
+  process.once('exit', onProcessExit)
+  ctx.effect(() => () => {
+    process.removeListener('exit', onProcessExit)
+    shutdownMirror()
+  })
+
   registerTools(ctx, {
     loop,
     signin,
@@ -563,9 +747,13 @@ export function apply(
     game,
     scheduler,
     adapters: registry,
-    adbPath: config.adbPath,
+    adbPath: adbPath,
     deviceSerial: serial,
     notifications,
+    runMode,
+    messageState,
+    dmWatch,
+    mirror: mirrorPanel,
   })
   registerCommands(ctx, {
     loop,
@@ -579,9 +767,13 @@ export function apply(
     game,
     scheduler,
     adapters: registry,
-    adbPath: config.adbPath,
+    adbPath: adbPath,
     deviceSerial: serial,
     notifications,
+    runMode,
+    messageState,
+    dmWatch,
+    mirror: mirrorPanel,
   })
   registerPersona(ctx)
 }

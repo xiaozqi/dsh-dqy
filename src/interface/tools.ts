@@ -21,6 +21,10 @@ import type { VoicePort } from '../domain/ports/voice.port.js'
 import type { NotificationService } from '../application/notifications/notification.service.js'
 import type { UiNode } from '../domain/types.js'
 import { registerAppTools } from './app-tools.js'
+import type { RunModePort } from '../domain/ports/run-mode.port.js'
+import type { MessageStatePort } from '../domain/ports/message-state.port.js'
+import type { DmWatchPipeline } from '../application/control/dm-watch-pipeline.js'
+import type { MirrorPanelService } from '../application/mirror/mirror-panel.service.js'
 
 export interface FishServices {
   loop: AgentLoop
@@ -37,6 +41,10 @@ export interface FishServices {
   adbPath: string
   deviceSerial: string
   notifications: NotificationPort
+  runMode: RunModePort
+  messageState: MessageStatePort
+  dmWatch: DmWatchPipeline
+  mirror: MirrorPanelService
 }
 
 export function registerTools(

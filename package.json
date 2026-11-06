@@ -23,6 +23,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "test:smoke": "npm run build && node --test tests/smoke.mjs",
     "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\""
   },
   "dsh": {
@@ -62,7 +63,11 @@
     "@deepseek-ai/dsh-llm": "0.0.1-rc.5",
     "@deepseek-ai/dsh-tools": "0.0.1-rc.1",
     "@deepseek-ai/schemastery": "3.18.5",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "js-yaml": "^5.5.0"
   }
 }

@@ -1,8 +1,62 @@
 # dsh-blue-fat-fish
 
-蓝色大肥鱼 —— 面向 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 的安卓手机智能体插件。
+> 把手机上的通知，变成大肥鱼的一次自主行动。
+> 通知进来 → 过滤 → 判断 → 动手 → 出声
 
-它拥有一台安卓手机的完整控制权：观察屏幕、点击滑动、输入文字、打开应用，配合长期记忆和 LLM 决策大脑，可以自主回 QQ 消息、刷抖音、玩简单游戏（如开心消消乐）、完成每日签到，并按计划定时执行。
+大肥鱼不再只是坐在桌面上等你打字的那只鱼——它开始盯着你的手机。
+
+蓝色大肥鱼是面向 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 的**事件驱动值守智能体**插件。核心是一条可插拔闭环链路：监听通知 → 过滤噪音 → LLM 决策 → 护栏硬校验 → UI 自动化执行 → 语音输出。平台只是配方，当前优先在抖音私信上打磨到 24 小时无人值守、零误发。
+
+> 本项目不做隐形代聊。使用时应告知对话方当前由 AI 值守应答；隐瞒使用 AI 应付他人不在推荐使用方式内。
+
+## 当前状态（如实标注）
+
+| 平台 | 状态 | 说明 |
+|---|---|---|
+| 抖音私信 | ✅ 核心验证链路 | 无可用个人协议，只能 UI 自动化，v0.1 只打磨这一条 |
+| B 站 / 微博 / 小红书 | 🚧 适配器已建，待配方化 | 优先级低于抖音稳定 |
+| QQ | 📋 协议优先 | 有成熟协议通道，不强行 UI 自动化 |
+| 支付宝 | ❌ 非目标 | 不做、不接受相关 PR；资金类风控严格，私信场景薄弱 |
+
+## 设计原则
+
+1. **默认关闭**：自动发送默认关闭，试运行默认开启（只记录拟发送内容，不真发）。
+2. **宁可不动**：规则模糊或校验失败时，优先选择不回复。
+3. **可回滚**：所有消息与发送持久化留痕，支持断点续跑与复盘。
+4. **能走协议就不走 UI**：有协议通道的平台优先协议，UI 自动化是兜底。
+5. **零件可换**：执行层可替换，配方与核心链路解耦，新增 App 只加一份 YAML。
+
+## 与现有项目的区别
+
+| 项目 | 它做什么 | 本项目的差异 |
+|---|---|---|
+| dsh-mobile-use | DSH 原生插件，自带 uiautomator2 与画面镜像 | 它是执行器；本项目是上层闭环，可选用它作为执行层 |
+| OneBot / QQ 拟人 Bot | 基于协议的 QQ 机器人 | 只覆盖有协议的平台；本项目面向无协议的私信场景 |
+| uiautomator2-mcp-server | uiautomator2 的工具封装 | 只提供操作能力；本项目补齐通知、过滤、决策、校验、状态机 |
+| 各平台 UI 脚本 | 硬编码单个 App 的收发 | 流程写死难迁移；本项目用 YAML 配方编排，平台与核心解耦 |
+| RVC / TTS 语音插件 | 独立音色能力 | 只负责声音；本项目把语音作为闭环末端输出 |
+
+别人提供零件，本项目定义串联零件的标准流水线。
+
+## 平台配方（YAML）
+
+平台的 UI 路径（打开 → 进会话 → 输入 → 发送 → 校验）写成 YAML，核心的通知路由、过滤、护栏、状态机全部复用。选择器支持 `{peer}`、`{reply}` 占位符，由运行时上下文填充。示例见 `assets/recipes/douyin.yml`：
+
+```yaml
+platform: douyin
+packageName: com.ss.android.ugc.aweme
+steps:
+  - action: open_app
+  - action: tap
+    selector: { text: 消息 }
+  - action: tap
+    selector: { text: "{peer}" }
+  - action: input
+    from: reply
+  - action: send
+  - action: verify
+    selector: { text: "{reply}" }
+```
 
 ## 架构
 
@@ -47,6 +101,13 @@ src/
 ├── application/
 │   ├── agent-loop.ts                think→act→observe 自治循环
 │   ├── guardrails.ts                安全护栏
+│   ├── control/                     值守闭环
+│   │   ├── run-mode.ts              运行模式（总开关/试运行/急停，持久化）
+│   │   ├── outbound-guard.ts        出站硬护栏（收件人/长度/URL，失败关闭）
+│   │   ├── message-state-store.ts   消息状态机与幂等（持久化）
+│   │   └── dm-watch-pipeline.ts     通知→决策→网关→发送 编排
+│   ├── recipes/
+│   │   └── recipe-executor.ts       把 YAML 配方步骤映射到 UI 驱动
 │   ├── support/
 │   │   └── wait-for.ts              waitFor / withRetry / 节点查找
 │   ├── adapters/
@@ -58,7 +119,7 @@ src/
 │   │   ├── bilibili.adapter.ts      哔哩哔哩（信息流 / 评论 / 社交 / 消息 / 直播）
 │   │   ├── weibo.adapter.ts         微博（信息流 / 评论 / 社交 / 消息）
 │   │   ├── xiaohongshu.adapter.ts   小红书（信息流 / 评论 / 社交 / 消息）
-│   │   ├── alipay.adapter.ts        支付宝（每日签到）
+│   │   ├── alipay.adapter.ts        支付宝（非目标：文件保留，但不实例化、不注册）
 │   │   ├── game.service.ts          模板驱动游戏循环（注册为 game 能力）
 │   │   └── game-policy.ts           游戏决策策略
 │   ├── scheduler/
@@ -84,6 +145,11 @@ src/
 │   │   └── action-parser.ts         两个适配器共用的动作解析
 │   └── vision/
 │       └── python-vision.ts         VisionPort 实现
+│   ├── state/
+│   │   └── file-state-store.ts      JSON 状态持久化（原子写）
+│   └── recipes/
+│       ├── recipe-loader.ts         YAML 配方加载与校验
+│       └── recipe-dm-sender.ts      基于配方的私信发送
 └── interface/
     ├── tools.ts                     核心工具注册（含 fish_apps / fish_app_run）
     ├── app-tools.ts                 应用工具注册
@@ -123,11 +189,11 @@ UiDriverPort（UI 定位驱动端口，extends DevicePort）
 | 平台 | 包名 | message | comment | social | live | feed | signin | pet | game | moment |
 |---|---|---|---|---|---|---|---|---|---|---|
 | QQ | com.tencent.mobileqq | ✅ | — | ✅ | — | — | — | — | — | ✅ |
-| 抖音 | com.ss.android.ugc.aweme | — | ✅ | ✅ | ✅ | ✅ | — | ✅ | — |
+| 抖音 | com.ss.android.ugc.aweme | 🚧 配方中 | ✅ | ✅ | ✅ | ✅ | — | ✅ | — |
 | 哔哩哔哩 | tv.danmaku.bili | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
 | 微博 | com.sina.weibo | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
 | 小红书 | com.xingin.xhs | ✅ | ✅ | ✅ | — | ✅ | — | — | — |
-| 支付宝 | com.eg.android.AlipayGphone | — | — | — | — | — | ✅ | — | — |
+| 支付宝 | com.eg.android.AlipayGphone | ❌ 非目标，不做、不接受 PR | | | | | | | |
 
 各适配器的 `todos` 字段登记了未实现的子能力（如 B 站直播弹幕、抖音私信、微博转发、小红书点赞评论、支付宝其余入口），新迭代直接在对应能力接口上补齐实现即可，无需改动注册与派发。
 
@@ -298,6 +364,28 @@ npx @deepseek-ai/dsh web
 | `signInPlans` | 声明式签到计划列表 |
 | `schedules` | 定时计划：每天到点执行对应签到 |
 
+`control` 段（值守闭环，安全默认值）：
+
+```yaml
+  control:
+    enabled: false          # 总开关，默认关闭
+    dryRun: true            # 试运行：只记录拟发送，不真发
+    allowedPeers:           # 收件人白名单，格式 包名:对方名；空列表=全部拦截
+      - com.ss.android.ugc.aweme:张三
+    maxLength: 500          # 单条回复长度上限
+    blockUrl: true          # 拦截含 URL 的回复
+    recipeDir: ''           # 配方目录，留空用内置 assets/recipes
+```
+
+| 字段 | 说明 |
+|---|---|
+| `control.enabled` | 自动发送总开关，默认 false；运行时也可用 `/watch enable` 切换并持久化 |
+| `control.dryRun` | 试运行，默认 true；切到 false 才会真实发送 |
+| `control.allowedPeers` | 收件人白名单，元素为 `包名:对方名`；空列表时硬护栏拦截所有收件人（失败关闭） |
+| `control.maxLength` | 回复字符数上限，超限拦截 |
+| `control.blockUrl` | 是否拦截含链接的回复，默认 true |
+| `control.recipeDir` | 平台配方目录，留空使用内置 `assets/recipes` |
+
 ### 垃圾通知自动清理
 
 主程序启动即监听 `notifications.httpPort`（默认 14123）并保持 adb reverse 隧道；手机端 NotifyListen APK 把每条通知转发到电脑端做 5 层过滤（白名单 / 重要度 / 规则 / 语义 / 去重），命中 block 的通知 key 由 APK 轮询取回并从通知栏自动 cancel，实测约 1-2 秒。`notifications.rules` 未配置时使用内置保守默认规则（不区分大小写）：
@@ -350,6 +438,13 @@ APK 离线保底：电脑端不可达（POST 连续失败 3 次）时，APK 用�
 - `/fish <目标>` —— 执行一个自主目标
 - `/signin <app>` —— 执行签到（计划优先，其次适配器 signIn 能力）
 - `/apps` —— 列出已注册适配器
+- `/halt` —— 急停：立即阻断所有自动发送（锁存，需 resume 解除）
+- `/watch <enable|disable|dryrun|live|resume>` —— 查看或切换值守模式；无参数显示当前状态
+- `/mirror <start|stop|status>` —— 控制内置 scrcpy 投屏窗口；无线设备启动前自动 adb connect，掉线自动重连
+
+## 内置投屏（scrcpy）
+
+投屏能力按分层内置，而非依赖外部插件：`domain` 定义 `MirrorPort`，`infrastructure/mirror` 用独立 scrcpy 进程实现（进程退出即唯一真相），复用同一套 adb 路径解析。相关配置见 `scrcpyPath` 与 `mirror.*`（置顶、窗口宽度、关屏、音频、重连）。
 
 ## 语音人格
 
@@ -427,11 +522,16 @@ npm publish --access public
 
 ## 安全护栏
 
-- 禁止打开系统设置与安装器，防止误操作支付、安装和系统改动；
-- 白名单模式（`allowedApps`）可进一步收窄可操作的应用；
-- 每个目标有步数上限，失控时自动停止；
-- 定时任务的错误被隔离记录，不会拖垮插件；
-- 记忆与截图均落在本地 `dataDir`，不上传第三方。
+安全是结构性的，不依赖提示词自觉：
+
+- **提示注入隔离**：处理外来私信的决策上下文不挂载任何设备工具，消息文本只能产出候选回复，无法触发动作；
+- **动作白名单**：仅允许打开会话、输入、发送等有限动作，模型无权临时打开相册、文件或浏览器；
+- **发送前硬校验**（代码层，独立于 LLM）：收件人必须在白名单、内容长度受限、默认拦截 URL，校验失败直接丢弃；
+- **失败关闭**：默认关闭自动发送、默认试运行（只记录拟发送内容）；规则模糊或异常时宁可不动；
+- **急停**：`/halt` 立即锁停所有出站消息，需显式 resume；
+- **幂等与状态机**：消息按 `包名+会话+文本哈希+时间窗` 去重，状态持久化，崩溃或通知重放不会重复回复；
+- 禁止打开系统设置与安装器，每个目标有步数上限，定时任务错误被隔离；
+- 记忆、截图与状态均落在本地 `dataDir`，并支持本地模型避免数据出本机。
 
 ## 自主运行（AutonomyLoop）
 
@@ -468,11 +568,23 @@ autonomy:
 
 冒烟：`node scripts/smoke-autonomy.mjs`（auto/forbidden/illegal/idle 四态）+ `node scripts/smoke-autonomy-schedule.mjs`（自调度/兜底/clamp/事件触发/忙碌锁），输出在 `data/voice-test/`，末行 `SMOKE_OK` 即通过。
 
+## 值守闭环冒烟测试
+
+不依赖真机或网络，用内置 `node:test` 跑通整条值守链路：`FakeLlm` 替代大模型、`FakeUiDriver` 模拟手机页面（选择器复用生产匹配逻辑），其余全部是真实生产类。
+
+```bash
+npm run test:smoke
+```
+
+覆盖 9 个场景：总开关关闭失败关闭、试运行只记录不发送、真实发送走中文输入并校验、通知重放幂等、非白名单拦截、无需回复、急停、URL 硬拦截、决策上下文隔离。末行 `# pass 9 / # fail 0` 即通过。
+
 ## 已知限制
 
 - 应用适配器中的界面选择器基于通用启发式（控件类型、文本、位置多路匹配），不同 App 版本需要按真实 UI 树微调；每个适配器的 `todos` 与代码内 `TODO(real-device)` 标注了待真机校准点；
-- **真机验证状态**：适配器代码全部通过 `tsc` 编译与 `npm run build`（零错误，硬基线）。**QQ（9.3.75）、抖音（41.0.0）、B站（9.17.0，已登录新号）已完成真机验证并据真机修复**（华为 VCE-AL00 EMUI，1080×2310）：发消息 / 评论 / 艾特等写动作验证停在发送前一步留证，点赞真点；**微博 / 小红书 / 支付宝 本轮仅编译冒烟、待后续真机验证**（微博已暂停投入，保持现状标记）。B站已验证要点：双列流点卡片进详情页后 back 换卡（页内 swipe 只滚评论不切视频）；评论输入占位文案轮换、静态无 EditText，靠输入栏命中；作者名与评论正文垂直重叠，配对窗口已按真机几何修正。驱动降级链的 uiautomator2 主链路依赖 `scripts/setup-u2.ps1` 安装（尚未在真机跑通前默认走 adb 链路）；
+- **真机验证状态**：适配器代码全部通过 `tsc` 编译与 `npm run build`（零错误，硬基线）。**QQ（9.3.75）、抖音（41.0.0）、B站（9.17.0，已登录新号）已完成真机验证并据真机修复**（华为 VCE-AL00 EMUI，1080×2310）：发消息 / 评论 / 艾特等写动作验证停在发送前一步留证，点赞真点；**微博 / 小红书 本轮仅编译冒烟、待后续真机验证**（微博已暂停投入，保持现状标记）；**支付宝为明确非目标，不接线、不验证、不接受 PR**。B站已验证要点：双列流点卡片进详情页后 back 换卡（页内 swipe 只滚评论不切视频）；评论输入占位文案轮换、静态无 EditText，靠输入栏命中；作者名与评论正文垂直重叠，配对窗口已按真机几何修正。驱动降级链的 uiautomator2 主链路依赖 `scripts/setup-u2.ps1` 安装（尚未在真机跑通前默认走 adb 链路）；
 - **通知接收方案**已正式纳入插件：`HttpNotificationSource` 为主源（插件进程内常驻 `0.0.0.0:14123`，接收手机端通知监听 APK 转发的 JSON，逐条落盘 `<dataDir>/notifications/received.log` 并送入过滤管线），`ReverseTunnelKeepAlive` 周期检查并保活 `adb reverse tcp:14123`（无线 adb 重连后自动重挂，设备离线只记 `lastError` 不崩），`LogcatNotificationSource` 为备用源（直接解析 logcat 通知行）；事件统一经 5 层过滤（白名单 / 重要度 / 规则 / LLM 语义 / 去重）后由 `fish_notifications` 工具查看统计与最近放行记录。手机端 APK 源码脚手架在 `android/notify-listen/`（`NotificationListenerService` 转发通知到 14123），编译安装后在手机「通知使用权」中授权即可。**真机端到端已验证（2026-11-04）**：真实手机通知经 APK → `adb reverse` → `HttpNotificationSource` → `received.log` 全链路落盘成功。注意：独立调试脚本 `resources/python/notify_listener.py` 与插件主源共用 14123 端口，二者只能跑一个——插件启用前先停掉独立脚本；若端口被占用，插件主源会把 EADDRINUSE 记到 `lastError` 并保持不监听，不会崩溃。
+- **中文输入边界**：`adb shell input text` 只支持 ASCII，无法直接输入中文；配方与驱动统一走 `inputChinese`（ADBKeyBoard 广播 / 剪贴板粘贴），并在结束后恢复原输入法；
+- **语音条限制**：当前 UI 自动化链路不保证自动发送语音条，RVC/TTS 输出主要用于本地播放；自动发语音消息（`fish_qq_voice_text`）仍为实验性，且受独立开关与白名单约束；
 - 开心消消乐的棋盘级求解需要自定义 `GamePolicy`，当前框架提供模板匹配与执行闭环，不含三消算法；
 - 定时调度依赖 DSH 进程在计划时刻处于运行状态，关机或进程未启动会错过当天执行；
 - 未连接真实手机时，设备相关工具会返回 `NO_DEVICE` 错误。

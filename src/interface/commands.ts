@@ -82,4 +82,80 @@ export function registerCommands(
       }
     },
   })
+
+  // Emergency stop: latches and blocks every outbound message immediately.
+  commands.register({
+    name: 'halt',
+    description: 'Emergency stop all automatic sending',
+    input: { hint: '' },
+    handler: async () => {
+      services.runMode.halt()
+      return { kind: 'success', text: 'halted: no message will be sent' }
+    },
+  })
+
+  // Inspect or change the watch mode (enable / disable / dryrun / resume).
+  commands.register({
+    name: 'watch',
+    description: 'Show or set the watch mode: enable, disable, dryrun, resume',
+    input: { hint: '<action>' },
+    handler: async (invocation: CommandInvocation) => {
+      const action = invocation.rawInput.trim().toLowerCase()
+      switch (action) {
+        case 'enable':
+          services.runMode.enable()
+          break
+        case 'disable':
+          services.runMode.disable()
+          break
+        case 'dryrun':
+          services.runMode.setDryRun(true)
+          break
+        case 'live':
+          services.runMode.setDryRun(false)
+          break
+        case 'resume':
+          services.runMode.resume()
+          break
+        case '':
+          break
+        default:
+          return {
+            kind: 'error',
+            text: 'unknown action; use enable, disable, dryrun, live or resume',
+          }
+      }
+      const s = services.runMode.snapshot()
+      return {
+        kind: 'success',
+        text: `enabled=${s.enabled} dryRun=${s.dryRun} halted=${s.halted}`,
+      }
+    },
+  })
+
+  // Control the scrcpy mirror window: start, stop or inspect its status.
+  commands.register({
+    name: 'mirror',
+    description: 'Start, stop or inspect the scrcpy phone mirror',
+    input: { hint: '<start|stop|status>' },
+    handler: async (invocation: CommandInvocation) => {
+      const action = invocation.rawInput.trim().toLowerCase()
+      if (action === 'start') {
+        const r = await services.mirror.start()
+        if (!r.ok) {
+          return { kind: 'error', text: r.error ?? 'mirror failed to start' }
+        }
+        return { kind: 'success', text: 'mirror starting' }
+      }
+      if (action === 'stop') {
+        await services.mirror.stop()
+        return { kind: 'success', text: 'mirror stopped' }
+      }
+      const s = services.mirror.getStatus()
+      return {
+        kind: 'success',
+        text: `state=${String(s.state)} serial=${String(s.serial)} scrcpy=${String(s.scrcpy)}`,
+      }
+    },
+  })
 }

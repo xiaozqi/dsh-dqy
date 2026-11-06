@@ -1,0 +1,23 @@
+platform: douyin
+packageName: com.ss.android.ugc.aweme
+displayName: 抖音
+steps:
+  - action: open_app
+    timeoutMs: 15000
+  - action: tap
+    selector:
+      text: 消息
+  - action: tap
+    selector:
+      text: "{peer}"
+    timeoutMs: 10000
+  - action: input
+    from: reply
+    selector:
+      className: EditText
+      regex: true
+  - action: send
+  - action: verify
+    selector:
+      text: "{reply}"
+    timeoutMs: 8000
