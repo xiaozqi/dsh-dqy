@@ -1,6 +1,7 @@
 # Dependencies and build output
 node_modules/
-lib/
+# lib/ is committed on purpose: DSH installs this package straight from git,
+# and the host does not run a build step for git dependencies.
 *.log
 
 # Local runtime data (secrets, memory, screenshots, one-off scripts)

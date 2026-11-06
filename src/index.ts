@@ -52,6 +52,7 @@ import { NodeShell } from './infrastructure/node-shell.js'
 import { createFileLogger } from './infrastructure/file-logger.js'
 import {
   CordisWebServer,
+  type HostEventScope,
   type HostWebServer,
 } from './infrastructure/web/cordis-web-server.js'
 import { MirrorHttpController } from './infrastructure/web/mirror-http.controller.js'
@@ -705,6 +706,7 @@ export function apply(
   // is adapted to the domain WebServerPort behind a structural cast.
   const hostWebServer = new CordisWebServer(
     (ctx as unknown as { webServer: HostWebServer }).webServer,
+    ctx as unknown as HostEventScope,
   )
   const httpController = new MirrorHttpController(
     hostWebServer,

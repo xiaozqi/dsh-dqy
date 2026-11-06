@@ -67,7 +67,6 @@ export function registerCommands(
   commands.register({
     name: 'apps',
     description: 'List registered app adapters and their capabilities',
-    input: { hint: '' },
     handler: async () => {
       const lines = services.adapters.list().map(a => {
         const capabilities = [...a.capabilities].join(',')
@@ -87,7 +86,6 @@ export function registerCommands(
   commands.register({
     name: 'halt',
     description: 'Emergency stop all automatic sending',
-    input: { hint: '' },
     handler: async () => {
       services.runMode.halt()
       return { kind: 'success', text: 'halted: no message will be sent' }
