@@ -887,11 +887,15 @@ export function apply(ctx: Context, config: FishConfig): void {
   // phone's notification store. The poll is what makes it "real time": it does
   // not depend on the shade, the bridge APK, or which app is in the foreground.
   let qqReplyBusy = false
-  let qqPending: {
+  // Bounded FIFO: every distinct message deserves its own reply, including a
+  // burst of three. The cap only exists so a stuck pipeline cannot grow it
+  // without limit.
+  let qqQueue: {
     source: string
     peer?: string
     message?: { text: string; when?: number }
-  } | null = null
+  }[] = []
+  const QQ_QUEUE_LIMIT = 8
   const qqLog = createFileLogger(resolve(dataDir, 'qq-auto-reply.log'))
   const runQqAutoReply = async (
     source: string,
@@ -904,10 +908,14 @@ export function apply(ctx: Context, config: FishConfig): void {
       return
     }
     if (qqReplyBusy) {
-      // Never drop a message just because another reply is in flight: keep the
-      // newest request and run it as soon as the current one finishes.
-      qqPending = { source, peer, message }
-      qqLog(`queued while busy: peer=${peer ?? '-'}`)
+      // Never drop a message just because another reply is in flight: queue it
+      // and run it as soon as the current one finishes, in arrival order.
+      if (qqQueue.length >= QQ_QUEUE_LIMIT) {
+        const dropped = qqQueue.shift()
+        qqLog(`queue full, dropped oldest: peer=${dropped?.peer ?? '-'}`)
+      }
+      qqQueue.push({ source, peer, message })
+      qqLog(`queued while busy (${qqQueue.length}): peer=${peer ?? '-'}`)
       return
     }
     qqReplyBusy = true
@@ -975,10 +983,11 @@ export function apply(ctx: Context, config: FishConfig): void {
       )
     } finally {
       qqReplyBusy = false
-      const next = qqPending
-      qqPending = null
+      const next = qqQueue.shift()
       if (next) {
-        qqLog(`draining queued reply: peer=${next.peer ?? '-'}`)
+        qqLog(
+          `draining queued reply (${qqQueue.length} left): peer=${next.peer ?? '-'}`,
+        )
         void runQqAutoReply(next.source, next.peer, next.message)
       }
     }
