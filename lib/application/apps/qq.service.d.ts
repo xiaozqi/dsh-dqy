@@ -57,6 +57,8 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
             text: string;
         }) => PolicyDecision;
     }): Promise<VoiceTextResult>;
+    /** True when the screen already is this peer's chat and the input bar exists. */
+    private isPeerChatOpen;
     /**
      * Reply to one named peer, driven by the notification that just arrived.
      *

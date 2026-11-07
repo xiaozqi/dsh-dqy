@@ -490,6 +490,28 @@ export class QqService
     }
   }
 
+  /** True when the screen already is this peer's chat and the input bar exists. */
+  private async isPeerChatOpen(peer: string): Promise<boolean> {
+    const observation = await this.driver.observe()
+    const hasInput = findNode(
+      observation.roots,
+      node =>
+        node.className.includes('EditText') ||
+        SELECTORS.inputHint.test(node.text) ||
+        SELECTORS.inputHint.test(node.desc),
+    )
+    if (!hasInput) {
+      return false
+    }
+    return (
+      findNode(
+        observation.roots,
+        node =>
+          (node.text || '').includes(peer) || (node.desc || '').includes(peer),
+      ) !== null
+    )
+  }
+
   /**
    * Reply to one named peer, driven by the notification that just arrived.
    *
@@ -507,12 +529,21 @@ export class QqService
       return null
     }
     await this.driver.connect()
-    await this.driver.openApp(QQ_PACKAGE)
-    await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
-    await ensureForeground(this.driver, QQ_PACKAGE)
-    await this.ensureConversationList()
-    await this.enterPeerConversation(name)
-    await sleep(1200)
+    // Opening QQ costs several seconds; if it is already in front (the usual
+    // case right after a notification), skip it entirely.
+    if ((await this.driver.foregroundApp()) !== QQ_PACKAGE) {
+      await this.driver.openApp(QQ_PACKAGE)
+      await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
+      await ensureForeground(this.driver, QQ_PACKAGE)
+    }
+    // Navigation (list → search → peer) is the slowest part. When the phone is
+    // already showing this chat — which is exactly where QQ sits when its
+    // notification fires — skip it.
+    if (!(await this.isPeerChatOpen(name))) {
+      await this.ensureConversationList()
+      await this.enterPeerConversation(name)
+    }
+    await sleep(600)
 
     const messages = await this.readMessages()
     const incoming = messages.filter(message => !message.isSelf)
@@ -1070,10 +1101,10 @@ export class QqService
       )
     }
     await this.driver.tap(centerOf(input))
-    await sleep(800)
+    await sleep(400)
     // Chinese replies must not go through the ASCII-only `input text` path.
     await enterText(this.driver, reply)
-    await sleep(500)
+    await sleep(300)
     await this.submitSend()
     return confirmOutgoing(this.driver, reply)
   }

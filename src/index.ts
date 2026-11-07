@@ -130,6 +130,9 @@ const defaultJunkRules: {
   action: 'allow' | 'block'
   caseSensitive: boolean
 }[] = [
+  // ADBKeyBoard posts a 「选择输入法」 notification on every Chinese injection;
+  // that is our own noise, not something the owner needs to see or process.
+  { pattern: '选择输入法|AdbKeyboard|ADB Keyboard', action: 'block', caseSensitive: false },
   { pattern: '广告|推广', action: 'block', caseSensitive: false },
   { pattern: '限时特惠|限时优惠|特惠|大促|秒杀|清仓', action: 'block', caseSensitive: false },
   { pattern: '优惠券|领券|返现', action: 'block', caseSensitive: false },
