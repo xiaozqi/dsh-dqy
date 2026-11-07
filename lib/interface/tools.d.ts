@@ -23,6 +23,7 @@ export interface ReplyHealth {
         queued: number;
         queueLimit: number;
         watchMs: number;
+        ownerPeers: string[];
     };
     douyin: {
         enabled: boolean;

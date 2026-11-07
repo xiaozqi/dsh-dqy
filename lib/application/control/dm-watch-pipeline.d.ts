@@ -5,6 +5,8 @@ import type { DirectMessageSender } from '../../domain/ports/dm-sender.port.js';
 import type { NotificationEvent } from '../../domain/notification-types.js';
 export interface DmWatchConfig {
     dedupeWindowMs: number;
+    /** `${app}:${peer}` entries that belong to the phone owner. Tone only. */
+    ownerPeers?: readonly string[];
 }
 export type DmWatchResult = 'duplicate' | 'ignored' | 'blocked' | 'dry-run' | 'sent';
 export interface DmWatchOutcome {

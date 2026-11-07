@@ -35,13 +35,14 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
     private readonly memory;
     private readonly voice;
     private readonly messageState?;
+    private readonly ownerPeers;
     readonly id = "qq";
     readonly displayName = "QQ";
     readonly packageName = "com.tencent.mobileqq";
     readonly capabilities: ReadonlySet<CapabilityId>;
     readonly todos: readonly AdapterTodo[];
     readonly capability: any;
-    constructor(driver: UiDriverPort, llm: LlmPort, memory: MemoryPort, voice: VoicePort, messageState?: MessageStatePort | undefined);
+    constructor(driver: UiDriverPort, llm: LlmPort, memory: MemoryPort, voice: VoicePort, messageState?: MessageStatePort | undefined, ownerPeers?: readonly string[]);
     initialize(): Promise<void>;
     sendMessage(input: SendMessageInput): Promise<AdapterResult>;
     sendImage(input: SendImageInput): Promise<AdapterResult>;
@@ -95,6 +96,7 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
     private ensureConversationList;
     private collectUnreadRows;
     private readMessages;
+    private isOwnerPeer;
     private composeReply;
     private sendReply;
     private peerName;

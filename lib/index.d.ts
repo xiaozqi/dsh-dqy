@@ -65,6 +65,8 @@ export interface ControlConfig {
     /** Answer incoming QQ notifications without waiting for a tool call. */
     qqAutoReply: boolean;
     allowedPeers: string[];
+    /** Owner's own chat accounts: tone only, never extra permission. */
+    ownerPeers: string[];
     maxLength: number;
     blockUrl: boolean;
     recipeDir: string;

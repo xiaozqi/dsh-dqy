@@ -211,6 +211,8 @@ export interface ControlConfig {
   /** Answer incoming QQ notifications without waiting for a tool call. */
   qqAutoReply: boolean
   allowedPeers: string[]
+  /** Owner's own chat accounts: tone only, never extra permission. */
+  ownerPeers: string[]
   maxLength: number
   blockUrl: boolean
   recipeDir: string
@@ -412,6 +414,14 @@ const configSchema = z.object({
         .array(z.string())
         .default([])
         .description('收件人白名单，格式 "包名:对方名"（如 com.tencent.mobileqq:张三）。空列表 = 谁都不发。'),
+      // The owner's own chat accounts. This only changes how she talks to
+      // them (and that she knows they are the owner); it deliberately grants
+      // no extra capability: a chat message cannot prove identity, so it must
+      // never be able to change policy, peers or confirmations.
+      ownerPeers: z
+        .array(z.string())
+        .default([])
+        .description('主人本人的账号，格式 "包名:对方名"；只影响回复语气与身份认知，不放宽任何发送或策略限制。'),
       maxLength: z.number().default(500),
       blockUrl: z.boolean().default(true),
       recipeDir: z.string().default(''),
@@ -643,7 +653,14 @@ export function apply(ctx: Context, config: FishConfig): void {
     stateStore,
     config.autonomy.confirmTtlMs,
   )
-  const qq = new QqService(serialDriver, llm, memory, routedVoice, messageState)
+  const qq = new QqService(
+    serialDriver,
+    llm,
+    memory,
+    routedVoice,
+    messageState,
+    config.control.ownerPeers,
+  )
   const douyin = new DouyinService(serialDriver, memory)
   const game = new GameService(
     serialDriver,
@@ -876,7 +893,10 @@ export function apply(ctx: Context, config: FishConfig): void {
     runMode,
     llm,
     dmSender,
-    { dedupeWindowMs: config.notifications.dedupeWindowMs },
+    {
+      dedupeWindowMs: config.notifications.dedupeWindowMs,
+      ownerPeers: config.control.ownerPeers,
+    },
   )
 
   // Every allowed notification enters the watch pipeline. The pipeline is
@@ -1289,6 +1309,7 @@ export function apply(ctx: Context, config: FishConfig): void {
           queueLimit: QQ_QUEUE_LIMIT,
           watchMs:
             (config.control as { qqWatchMs?: number }).qqWatchMs ?? 5000,
+          ownerPeers: [...config.control.ownerPeers],
         },
         douyin: {
           enabled: config.control.enabled,

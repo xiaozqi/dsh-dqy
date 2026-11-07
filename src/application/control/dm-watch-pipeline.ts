@@ -16,6 +16,8 @@ import type { OutboundMessage } from '../../domain/control-types.js'
 
 export interface DmWatchConfig {
   dedupeWindowMs: number
+  /** `${app}:${peer}` entries that belong to the phone owner. Tone only. */
+  ownerPeers?: readonly string[]
 }
 
 export type DmWatchResult =
@@ -186,8 +188,11 @@ export class DmWatchPipeline {
   }
 
   private async askForReply(event: NotificationEvent): Promise<ReplyDecision> {
+    const owner = (this.config.ownerPeers ?? []).includes(
+      `${event.app}:${event.title.trim()}`,
+    )
     const messages: ChatMessage[] = [
-      { role: 'system', content: this.systemPrompt() },
+      { role: 'system', content: this.systemPrompt(owner) },
       {
         role: 'user',
         content: `sender=${event.title}\nmessage=${event.text}`,
@@ -197,9 +202,11 @@ export class DmWatchPipeline {
     return parseReplyDecision(raw)
   }
 
-  private systemPrompt(): string {
+  private systemPrompt(owner: boolean): string {
     return [
-      'You are a message watch assistant for an offline owner.',
+      owner
+        ? 'You are a message watch assistant for the phone owner, who is writing from one of their own accounts.'
+        : 'You are a message watch assistant for an offline owner.',
       'You cannot operate the phone or call any tools; you only produce text.',
       'Decide whether an inbound direct message needs a short, human reply.',
       'Reply with one JSON object and nothing else:',
