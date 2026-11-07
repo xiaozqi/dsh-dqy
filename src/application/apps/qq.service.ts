@@ -597,7 +597,13 @@ export class QqService
     // Keep the journal honest: a claimed message must end in sent/failed, not
     // sit in "pending" forever (that is what the health panel reads).
     const mark = (
-      phase: 'filtered' | 'acting' | 'sent' | 'verified' | 'failed',
+      phase:
+        | 'filtered'
+        | 'decided'
+        | 'acting'
+        | 'sent'
+        | 'verified'
+        | 'failed',
       detail?: string,
     ): void => {
       try {
