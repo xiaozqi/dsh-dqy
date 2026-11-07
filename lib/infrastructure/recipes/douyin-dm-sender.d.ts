@@ -14,8 +14,10 @@ export declare class DouyinDmSender implements DirectMessageSender {
     private readonly driver;
     constructor(driver: UiDriverPort);
     send(input: DirectMessageSendInput): Promise<void>;
-    /** In the right conversation when the input bar is visible and the header names the peer. */
+    /** In the right conversation when the bottom input bar and top header both match. */
     private isPeerChat;
+    /** Hard gate: never type into a chat whose header names someone else. */
+    private assertPeerChat;
     private openPeerChat;
     private findPeerRow;
     private typeAndSend;

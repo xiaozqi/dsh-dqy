@@ -59,6 +59,8 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
     }): Promise<VoiceTextResult>;
     /** True when the screen already is this peer's chat and the input bar exists. */
     private isPeerChatOpen;
+    /** Hard gate: refuse to type unless the chat header names this peer. */
+    private assertPeerChat;
     /**
      * Reply to one named peer, driven by the notification that just arrived.
      *

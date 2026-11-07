@@ -6,6 +6,10 @@ import type {
 import type { UiDriverPort } from '../../domain/ports/ui-driver.port.js'
 import { centerOf, findNode, sleep, waitFor } from '../../application/support/wait-for.js'
 import { ensureDeviceReady } from '../../application/support/device-ready.js'
+import {
+  findBottomInput,
+  headerShowsPeer,
+} from '../../application/support/chat-surface.js'
 import type { UiNode } from '../../domain/types.js'
 
 export const DOUYIN_PACKAGE = 'com.ss.android.ugc.aweme'
@@ -51,28 +55,43 @@ export class DouyinDmSender implements DirectMessageSender {
     if (!(await this.isPeerChat(peer))) {
       await this.openPeerChat(peer)
     }
+    // Navigation can fail silently; confirm the destination before typing.
+    await this.assertPeerChat(peer)
     await this.typeAndSend(reply)
   }
 
-  /** In the right conversation when the input bar is visible and the header names the peer. */
+  /** In the right conversation when the bottom input bar and top header both match. */
   private async isPeerChat(peer: string): Promise<boolean> {
-    const observation = await this.driver.observe()
-    const hasInput = findNode(
-      observation.roots,
+    const [observation, size] = await Promise.all([
+      this.driver.observe(),
+      this.driver.screenSize(),
+    ])
+    const input = findBottomInput(
+      observation,
+      size,
       node =>
         INPUT_HINT.test(node.text) ||
         INPUT_HINT.test(node.desc) ||
         node.className.includes('EditText'),
     )
-    if (!hasInput) {
+    if (!input) {
       return false
     }
-    return (
-      findNode(
-        observation.roots,
-        node => node.text.includes(peer) || node.desc.includes(peer),
-      ) !== null
-    )
+    return headerShowsPeer(observation, peer, size)
+  }
+
+  /** Hard gate: never type into a chat whose header names someone else. */
+  private async assertPeerChat(peer: string): Promise<void> {
+    const [observation, size] = await Promise.all([
+      this.driver.observe(),
+      this.driver.screenSize(),
+    ])
+    if (!headerShowsPeer(observation, peer, size)) {
+      throw new DeviceError(
+        'DM_PEER_MISMATCH',
+        `chat header does not show ${peer}; refusing to send`,
+      )
+    }
   }
 
   private async openPeerChat(peer: string): Promise<void> {

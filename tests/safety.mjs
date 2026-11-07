@@ -783,3 +783,39 @@ test('qq peer kind: groups and service accounts are not auto-replied', async () 
   assert.equal(stripPeerPrefix('张三: 明天交作业'), '明天交作业')
   assert.equal(stripPeerPrefix('明天交作业'), '明天交作业')
 })
+
+test('chat surface: header must be in the top band, input in the bottom band', async () => {
+  const { headerShowsPeer, findBottomInput } = await import(
+    '../lib/application/support/chat-surface.js'
+  )
+  const size = { width: 1080, height: 2310 }
+  const node = (text, top, bottom, className = 'android.widget.TextView') => ({
+    text,
+    desc: '',
+    resourceId: '',
+    className,
+    clickable: false,
+    bounds: { left: 0, top, right: 1080, bottom },
+    children: [],
+  })
+  const header = node('张三', 80, 140)
+  assert.ok(headerShowsPeer({ roots: [header], screenSize: size }, '张三', size))
+  const rowInMiddle = node('张三', 900, 980)
+  assert.equal(
+    headerShowsPeer({ roots: [rowInMiddle], screenSize: size }, '张三', size),
+    false,
+  )
+  const bottomInput = node('', 1900, 2000, 'android.widget.EditText')
+  assert.ok(
+    findBottomInput({ roots: [bottomInput], screenSize: size }, size, n =>
+      n.className.includes('EditText'),
+    ),
+  )
+  const searchBoxAtTop = node('', 300, 380, 'android.widget.EditText')
+  assert.equal(
+    findBottomInput({ roots: [searchBoxAtTop], screenSize: size }, size, n =>
+      n.className.includes('EditText'),
+    ),
+    null,
+  )
+})
