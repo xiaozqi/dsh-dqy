@@ -523,24 +523,23 @@ export class QqService
   async replyToPeer(
     peer: string,
     authorize: (input: { peer: string; text: string }) => PolicyDecision,
+    message?: { text: string; when?: number },
   ): Promise<ConversationReply | null> {
     const name = peer.trim()
     if (!name) {
       return null
     }
-    // A reply to this peer in the last minute means this notification is just
-    // more activity in a conversation we already answered. Checking the
-    // journal costs nothing; the UI pass costs tens of seconds.
-    const recent = this.messageState
-      ?.list()
-      .find(
-        record =>
-          record.conversationId === `qq:${name}` &&
-          Date.now() - record.updatedAt < 60_000,
-      )
-    if (recent) {
+    const trigger = message?.text?.trim() ?? ''
+    // Dedupe on the message itself, never on "we replied recently": two
+    // messages seconds apart must both get an answer, while a replayed
+    // notification for the same message must not be answered twice.
+    const messageKey = trigger
+      ? `qq-reply:${name}:${hashText(`${trigger}|${message?.when ?? ''}`)}`
+      : ''
+    if (messageKey && this.messageState?.seen(messageKey)) {
       return null
     }
+
     await this.driver.connect()
     // Opening QQ costs several seconds; if it is already in front (the usual
     // case right after a notification), skip it entirely.
@@ -558,18 +557,29 @@ export class QqService
     }
     await sleep(600)
 
-    const messages = await this.readMessages()
-    const incoming = messages.filter(message => !message.isSelf)
+    let incoming: ConversationMessage[]
+    if (trigger) {
+      // The notification already carries the message text, so the screen read
+      // is unnecessary; it is also the most expensive step.
+      incoming = [{ sender: name, content: trigger, isSelf: false, time: '' }]
+    } else {
+      const messages = await this.readMessages()
+      incoming = messages.filter(message => !message.isSelf)
+    }
+    if (incoming.length === 0) {
+      return null
+    }
+
     const last = incoming[incoming.length - 1]?.content ?? ''
-    const key = `qq-reply:${name}:${hashText(last)}`
-    if (this.messageState?.seen(key)) {
+    const key = messageKey || `qq-reply:${name}:${hashText(last)}`
+    if (!messageKey && this.messageState?.seen(key)) {
       return null
     }
     this.messageState?.claim({
       idempotencyKey: key,
       app: QQ_PACKAGE,
       conversationId: `qq:${name}`,
-      textHash: hashText(last),
+      textHash: hashText(trigger || last),
     })
 
     const reply = await this.composeReply(name, incoming)

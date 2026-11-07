@@ -884,16 +884,27 @@ export function apply(ctx: Context, config: FishConfig): void {
   // phone's notification store. The poll is what makes it "real time": it does
   // not depend on the shade, the bridge APK, or which app is in the foreground.
   let qqReplyBusy = false
+  let qqPending: {
+    source: string
+    peer?: string
+    message?: { text: string; when?: number }
+  } | null = null
   const qqLog = createFileLogger(resolve(dataDir, 'qq-auto-reply.log'))
   const runQqAutoReply = async (
     source: string,
     peer?: string,
+    message?: { text: string; when?: number },
   ): Promise<void> => {
     qqLog(`trigger source=${source} peer=${peer ?? '-'} busy=${qqReplyBusy}`)
-    if (qqReplyBusy || !config.control.qqAutoReply) {
-      qqLog(
-        `skip: busy=${qqReplyBusy} qqAutoReply=${config.control.qqAutoReply}`,
-      )
+    if (!config.control.qqAutoReply) {
+      qqLog('skip: qqAutoReply disabled')
+      return
+    }
+    if (qqReplyBusy) {
+      // Never drop a message just because another reply is in flight: keep the
+      // newest request and run it as soon as the current one finishes.
+      qqPending = { source, peer, message }
+      qqLog(`queued while busy: peer=${peer ?? '-'}`)
       return
     }
     qqReplyBusy = true
@@ -909,7 +920,7 @@ export function apply(ctx: Context, config: FishConfig): void {
       // unread-badge race (QQ clears the badge as soon as it is handled).
       if (peer) {
         const single = await qq
-          .replyToPeer(peer, authorize)
+          .replyToPeer(peer, authorize, message)
           .catch(err => {
             console.warn(
               `[qq] replyToPeer(${peer}) failed:`,
@@ -961,6 +972,12 @@ export function apply(ctx: Context, config: FishConfig): void {
       )
     } finally {
       qqReplyBusy = false
+      const next = qqPending
+      qqPending = null
+      if (next) {
+        qqLog(`draining queued reply: peer=${next.peer ?? '-'}`)
+        void runQqAutoReply(next.source, next.peer, next.message)
+      }
     }
   }
 
@@ -973,7 +990,10 @@ export function apply(ctx: Context, config: FishConfig): void {
     }
     // Let the notification shade settle before QQ is opened and read.
     setTimeout(() => {
-      void runQqAutoReply('notification', decision.event.title || undefined)
+      void runQqAutoReply('notification', decision.event.title || undefined, {
+        text: decision.event.text,
+        when: decision.event.when,
+      })
     }, 1500)
   })
 
@@ -984,7 +1004,11 @@ export function apply(ctx: Context, config: FishConfig): void {
       readNotifications: () =>
         adb.run(['shell', 'dumpsys', 'notification', '--noredact'], 20000),
       onPing: ping => {
-        void runQqAutoReply(`watch:${ping.title || 'qq'}`, ping.title || undefined)
+        void runQqAutoReply(
+          `watch:${ping.title || 'qq'}`,
+          ping.title || undefined,
+          { text: ping.text },
+        )
       },
       intervalMs: qqWatchMs,
       packageName: qq.packageName,

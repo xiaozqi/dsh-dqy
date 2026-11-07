@@ -70,7 +70,10 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
     replyToPeer(peer: string, authorize: (input: {
         peer: string;
         text: string;
-    }) => PolicyDecision): Promise<ConversationReply | null>;
+    }) => PolicyDecision, message?: {
+        text: string;
+        when?: number;
+    }): Promise<ConversationReply | null>;
     replyToUnread(options?: QqOptions): Promise<ConversationReply[]>;
     private enterPeerConversation;
     private focusChatInput;
