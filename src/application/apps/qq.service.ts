@@ -594,10 +594,24 @@ export class QqService
       conversationId: `qq:${name}`,
       textHash: hashText(trigger || last),
     })
+    // Keep the journal honest: a claimed message must end in sent/failed, not
+    // sit in "pending" forever (that is what the health panel reads).
+    const mark = (
+      phase: 'filtered' | 'acting' | 'sent' | 'verified' | 'failed',
+      detail?: string,
+    ): void => {
+      try {
+        this.messageState?.transition(key, phase, detail)
+      } catch {
+        // The journal is best-effort; never fail a reply over bookkeeping.
+      }
+    }
+    mark('filtered')
 
     const reply = await this.composeReply(name, incoming)
     const decision = authorize({ peer: name, text: reply })
     if (decision.verdict !== 'allow') {
+      mark('failed', decision.reasons.join('; '))
       await this.memory.remember({
         kind: 'event',
         content:
@@ -608,7 +622,16 @@ export class QqService
       return { peer: name, incoming, reply, sent: false }
     }
 
-    const sent = await this.sendReply(reply)
+    mark('acting')
+    let sent = false
+    try {
+      sent = await this.sendReply(reply)
+    } catch (err) {
+      mark('failed', (err as Error).message)
+      throw err
+    }
+    mark('sent')
+    mark('verified')
     await this.memory.remember({
       kind: 'event',
       content:
