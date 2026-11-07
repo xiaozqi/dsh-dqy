@@ -927,6 +927,11 @@ export function apply(ctx: Context, config: FishConfig): void {
           return
         }
         qqLog(`replyToPeer returned null (duplicate or empty) peer=${peer}`)
+        // The peer was known and already handled; a second unread scan would
+        // just repeat the same slow UI pass for no gain.
+        if (peer) {
+          return
+        }
       }
       const replies = await qq.replyToUnread({
         maxConversations: 1,
