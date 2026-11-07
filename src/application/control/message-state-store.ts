@@ -82,6 +82,23 @@ export class MessageStateStore implements MessageStatePort {
   }
 
   private persist(): void {
+    // The journal is an idempotency aid, not an archive: without pruning it
+    // grows one entry per notification forever, and every save rewrites the
+    // whole file.
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+    for (const [key, record] of this.records) {
+      if (record.updatedAt < cutoff) {
+        this.records.delete(key)
+      }
+    }
+    if (this.records.size > 2000) {
+      const oldest = [...this.records.entries()]
+        .sort((left, right) => left[1].updatedAt - right[1].updatedAt)
+        .slice(0, this.records.size - 2000)
+      for (const [key] of oldest) {
+        this.records.delete(key)
+      }
+    }
     const payload: PersistedState = Object.fromEntries(this.records)
     this.store.save(STORE_KEY, payload)
   }

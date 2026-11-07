@@ -107,7 +107,12 @@ export class GuardedAdapterRegistry implements AppAdapterRegistry {
     if (!gated || !capabilityObject) {
       return capabilityObject
     }
-    return this.wrap(capabilityObject, id, gated)
+    // Policy identity is the package name, never the adapter id: notifications
+    // and control.allowedPeers are keyed by package, so `qq` and
+    // `com.tencent.mobileqq` must not be two different peers.
+    const adapter = this.inner.get(id)
+    const policyApp = adapter.packageName || id
+    return this.wrap(capabilityObject, policyApp, gated)
   }
 
   private wrap<T>(target: T, app: string, gated: GatedMethod[]): T {

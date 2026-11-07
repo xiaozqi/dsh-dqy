@@ -197,7 +197,7 @@ export function registerAppTools(
           voice: args.voice ?? undefined,
           authorize: input =>
             services.runMode.decide({
-              app: 'qq',
+              app: services.qq.packageName,
               surface: 'voice',
               peer: input.peer,
               text: input.text,
@@ -292,7 +292,7 @@ export function registerAppTools(
           // registry, so the policy is enforced per reply.
           authorize: input =>
             services.runMode.decide({
-              app: 'qq',
+              app: services.qq.packageName,
               surface: 'message',
               peer: input.peer,
               text: input.text,
@@ -398,7 +398,7 @@ export function registerAppTools(
             // ever types it.
             const decision = gate(
               {
-                app: 'douyin',
+                app: services.douyin.packageName,
                 surface: 'comment',
                 text: args.text ?? '',
               },
@@ -414,7 +414,7 @@ export function registerAppTools(
           case 'forward': {
             const target = args.target ?? ''
             const decision = gate(
-              { app: 'douyin', surface: 'share', peer: target },
+              { app: services.douyin.packageName, surface: 'share', peer: target },
               'douyin forward',
             )
             if (decision.verdict === 'dry-run') {
@@ -428,7 +428,7 @@ export function registerAppTools(
             const target = args.target ?? ''
             const decision = gate(
               {
-                app: 'douyin',
+                app: services.douyin.packageName,
                 surface: 'mention',
                 peer: target,
                 text: args.text ?? '',

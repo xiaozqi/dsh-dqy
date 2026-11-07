@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { resolve } from 'node:path'
@@ -35,9 +36,25 @@ export class FileStateStore implements StateStorePort {
 
   save<T>(key: string, value: T): void {
     const path = this.pathFor(key)
-    const tmp = `${path}.tmp`
-    writeFileSync(tmp, JSON.stringify(value), 'utf8')
-    renameSync(tmp, path)
+    // Unique temp name per write: a tool call and a scheduler tick saving the
+    // same key used to share one `.tmp` file and race the rename into
+    // ENOENT/EPERM, losing the state write.
+    const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+    try {
+      writeFileSync(tmp, JSON.stringify(value), 'utf8')
+      renameSync(tmp, path)
+    } catch (err) {
+      // State is best-effort: a full or locked disk must not throw from inside
+      // a tool call, and the previous file is still intact.
+      console.warn(
+        `[state] failed to persist "${key}": ${(err as Error).message}`,
+      )
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        // nothing else to clean up
+      }
+    }
   }
 
   private pathFor(key: string): string {

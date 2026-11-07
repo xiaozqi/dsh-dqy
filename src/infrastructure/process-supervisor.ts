@@ -59,7 +59,14 @@ export class ProcessSupervisor {
   spawn(cmd: string, args: string[], options: ProcessRunOptions = {}): ChildProcess {
     const child = spawn(cmd, args, {
       cwd: options.cwd,
-      env: options.env,
+      env: options.env ?? {
+        ...process.env,
+        // Python on Windows picks the ANSI code page for piped stdout, which
+        // turns every Chinese UI string into replacement characters and makes
+        // Chinese input verification fail on text that was actually correct.
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
+      },
       windowsHide: true,
       stdio: options.stdio ?? 'ignore',
       detached: process.platform !== 'win32',
@@ -75,7 +82,14 @@ export class ProcessSupervisor {
     return new Promise(resolve => {
       const child = spawn(cmd, args, {
         cwd: options.cwd,
-        env: options.env,
+        env: options.env ?? {
+        ...process.env,
+        // Python on Windows picks the ANSI code page for piped stdout, which
+        // turns every Chinese UI string into replacement characters and makes
+        // Chinese input verification fail on text that was actually correct.
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
+      },
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',

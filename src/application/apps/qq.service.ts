@@ -156,6 +156,23 @@ export class QqService
     try {
       await this.driver.connect()
       await openAndWait(this.driver, QQ_PACKAGE, { timeoutMs: 30000 })
+      // QQ resumes into the last opened chat, where the conversation list and
+      // its search entry are both absent — entering a peer then times out.
+      const onConversationList = async (): Promise<boolean> => {
+        const obs = await this.driver.observe()
+        return (
+          findNode(
+            obs.roots,
+            node => node.desc === '搜索' || node.text === '搜索',
+          ) !== null ||
+          findNode(obs.roots, node => /:id\/aua$/.test(node.resourceId)) !==
+            null
+        )
+      }
+      if (!(await onConversationList())) {
+        await this.driver.pressKey('back')
+        await sleep(800)
+      }
       await this.enterPeerConversation(peer)
       // The chat can change under us (incoming notification, another actor),
       // so never type into a screen that is not QQ.
@@ -172,10 +189,10 @@ export class QqService
         tags: ['qq', 'send', peer],
       })
       return confirmed
-        ? okResult(`message sent to ${peer}`, { peer, text })
+        ? okResult(`message sent to ${peer}`, { peer, text, sent: true })
         : failResult(
             `send flow completed but bubble not observed for ${peer}`,
-            { peer, text },
+            { peer, text, sent: false },
           )
     } catch (err) {
       return failResult(
@@ -509,9 +526,18 @@ export class QqService
 
     const rows = await this.collectUnreadRows()
     const results: ConversationReply[] = []
+    // One reply per conversation per run. The same chat can be collected twice
+    // (overlapping clickable wrappers), and a sent reply changes the latest
+    // message, which changed the idempotency key and answered the same person
+    // twice in one call.
+    const handled = new Set<string>()
 
     for (const row of rows.slice(0, maxConversations)) {
-      const peer = this.peerName(row)
+      const peer = this.peerName(row).trim()
+      if (!peer || handled.has(peer)) {
+        continue
+      }
+      handled.add(peer)
       await this.driver.tap(centerOf(row))
       await sleep(1500)
 
@@ -860,15 +886,29 @@ export class QqService
         node.bounds.bottom - node.bounds.top > 40 &&
         node.bounds.bottom - node.bounds.top < 220,
     )
+    // Service accounts also carry unread badges and their preview text is not
+    // a peer name; replying to them is never what "answer my friends" means.
+    const isServiceRow = (row: UiNode): boolean => {
+      const name = (row.desc || row.text || '').split(',')[0]?.trim() ?? ''
+      return /^(公众号|服务号|订阅号|QQ安全中心|QQ团队|频道助手|我的关联QQ账号)/.test(
+        name,
+      )
+    }
     const unread = clickable.filter(
       row =>
-        findNode(
-          row.children,
-          child =>
-            SELECTORS.unreadBadge.test(child.desc) ||
-            SELECTORS.unreadBadge.test(child.text) ||
-            /^\d+$/.test(child.text),
-        ) !== null,
+        !isServiceRow(row) &&
+        // QQ 9.3.x puts the whole row summary ("name, ,2条未读,...") in the
+        // row node's own content-desc, not in child nodes — checking only
+        // children made every badge invisible and the reply loop a no-op.
+        (SELECTORS.unreadBadge.test(row.desc) ||
+          SELECTORS.unreadBadge.test(row.text) ||
+          findNode(
+            row.children,
+            child =>
+              SELECTORS.unreadBadge.test(child.desc) ||
+              SELECTORS.unreadBadge.test(child.text) ||
+              /^\d+$/.test(child.text),
+          ) !== null),
     )
     // Only rows that actually carry an unread badge. The old fallback to every
     // clickable row meant "badges cleared" became "these chats are unread",
@@ -972,6 +1012,13 @@ export class QqService
     if (aua) {
       const name = aua.desc.split(',')[0]?.trim()
       if (name) return name
+    }
+    // QQ 9.3.83 puts "name, ,2条未读,preview" on the row node itself; the first
+    // comma segment is the peer name. Child text is the preview, which used to
+    // be glued into the name and made the conversation impossible to open.
+    const own = (row.desc || '').split(',')[0]?.trim()
+    if (own) {
+      return own
     }
     const title = findNode(
       row.children,
