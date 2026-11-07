@@ -598,3 +598,23 @@ test('device: a wireless reconnect refreshes the serial and retries connect', as
   assert.equal(serial, 'new:5555')
   rmSync(dir, { recursive: true, force: true })
 })
+
+test('action parser: trailing prose and a second object are ignored', async () => {
+  const { parseActionContent } = await import(
+    '../lib/infrastructure/llm/action-parser.js'
+  )
+  const action = parseActionContent(
+    '先说明：我要点一下\n{"thought":"tap it","name":"tap","args":{"x":1,"y":2}}\n{"note":"extra object"}',
+  )
+  assert.equal(action.name, 'tap')
+  assert.deepEqual(action.args, { x: 1, y: 2 })
+})
+
+test('action parser: braces inside strings do not break the scan', () => {
+  return import('../lib/infrastructure/llm/action-parser.js').then(({ parseActionContent }) => {
+    const action = parseActionContent(
+      '{"thought":"text has } brace","name":"finish","args":{"summary":"a } b"}}',
+    )
+    assert.equal(action.name, 'finish')
+  })
+})

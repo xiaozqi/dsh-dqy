@@ -1,9 +1,11 @@
 import type { AgentAction } from '../../domain/types.js';
 /**
- * Extract the first JSON object from model text.
+ * Extract the first complete JSON object from model text.
  *
- * Providers occasionally prepend prose before a JSON body, so the parser slices
- * between the outermost braces instead of requiring a pure JSON document.
+ * Providers occasionally wrap the action in prose or emit a second object
+ * afterwards. Slicing between the outermost braces used to swallow that
+ * trailing text ("Unexpected non-whitespace character after JSON"), so scan
+ * for the matching closing brace instead, ignoring braces inside strings.
  */
 export declare function extractJsonObject(content: string): string;
 /**

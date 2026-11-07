@@ -56,6 +56,19 @@ cf_mw533nu4_e2e5eec5 xiaohongshu/feed/browseFeed args {"count":3}
 
 即：她会在没人看着的时候自己醒来、判断、提出要做什么，但**不会自己批准**，需要主人 `/confirm approve <id>`。
 
+### 2.6 自主目标执行（不是预设脚本）
+
+```
+fish_goal("打开抖音，向上滑两条视频（每条停留两秒左右），
+           然后按 Home 回到桌面，最后用一句话汇报你做了什么。")
+→ completed after 7 steps: 打开抖音，向上滑了两条视频并各停留约两秒，
+  然后按 Home 回到桌面，并口头汇报完成情况。
+```
+
+这是**逐屏看 + 自己决定下一步**的闭环：每一步先 `observe` 拿 UI 树，再让模型输出一个动作（tap/swipe/press_key/…），执行后再观察，直到 `finish`。7 步完成，没有人工干预。
+
+> 演示这里顺手修了一个真实 bug：模型偶尔会在 JSON 前后带说明文字或第二个对象，旧解析器取「第一个 `{` 到最后一个 `}`」会报 `Unexpected non-whitespace character after JSON`。现在按括号配对取第一个完整对象，并加了 2 条回归测试。
+
 ## 3. 复现步骤
 
 1. 手机开 USB 调试、连上 adb；QQ/抖音已登录。
