@@ -90,6 +90,24 @@ fish_goal("打开抖音，向上滑两条视频（每条停留两秒左右），
 
 4. 在会话里依次触发：`fish_observe` → `fish_douyin_feed` → `fish_douyin_interact(forward)` → `fish_app_run(qq/sendMessage)`。
 
+## 3.5 演示顺序与预期输出（约 3 分钟）
+
+| 步骤 | 调用 | 预期输出 | 讲解点 |
+|---|---|---|---|
+| 1 | `fish_observe` | 当前前台 App + 屏幕文字 + 截图路径 | 她先看，再动 |
+| 2 | `fish_douyin_feed(videos=3, watchMs=2500)` | `watched 3 videos, liked N` | 真机滑屏与点赞 |
+| 3 | `fish_douyin_interact(forward, 东隅桑榆)` | `forward done: shared with 东隅桑榆` | 两步分享：选人→发送，失败会如实报 |
+| 4 | `fish_app_run(qq/message/sendMessage, peer=…, text=中文)` | `ok - message sent to … , sent=true` | 中文走 ADBKeyBoard，发送有气泡校验 |
+| 5 | `fish_qq_reply(maxConversations=2)` | `已读: sent -> 中文回复` 或 `no unread` | 只回真实未读；公众号被过滤 |
+| 6 | `fish_goal("打开抖音，滑两条视频，回桌面并汇报")` | `completed after N steps` | 逐屏决策的自主闭环 |
+| 7 | `fish_confirmations` | 发送模式 + 待批动作列表 | 对外动作要主人 `/confirm approve` |
+
+**兜底话术**
+
+- 第 5 步返回 `no unread`：正常，讲「没有红点就不会主动打扰别人」。
+- 设备掉线：报 `DEVICE_TIMEOUT` / `NO_DEVICE`，讲「工具有超时、设备调用串行、无线重连会自动重解析串号」。
+- 发送被拦：把错误原文展示出来，讲「白名单失败关闭 + 错误里直接给出要加的那一行」。
+
 ## 4. 安全边界（演示时可以讲）
 
 - **一条出站闸**：工具、自主循环、值守管道都走 `RunMode.decide()`，`/halt` 真能拦住自主循环。
