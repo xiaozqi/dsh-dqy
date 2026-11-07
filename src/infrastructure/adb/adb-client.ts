@@ -16,8 +16,25 @@ interface BinaryExecResult {
 export class AdbClient {
   constructor(
     private readonly adbPath: string,
-    private readonly serial?: string,
+    private serial?: string,
   ) {}
+
+  /**
+   * Replace the serial after a wireless reconnect.
+   *
+   * A phone on `192.168.x.y:5555` comes back with a different address; the
+   * serial resolved at plugin load is then dead and every call fails with
+   * "device not found" until the harness restarts.
+   */
+  setSerial(serial: string): void {
+    if (serial) {
+      this.serial = serial
+    }
+  }
+
+  get currentSerial(): string | undefined {
+    return this.serial
+  }
 
   async run(args: string[], timeoutMs = 30000): Promise<string> {
     const result: ExecResult = await this.exec(

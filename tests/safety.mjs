@@ -4,6 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { request } from 'node:http'
+import { tmpdir } from 'node:os'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { OutboundGuard, buildPeerSet, peerKey } from '../lib/application/control/outbound-guard.js'
 import { RunMode } from '../lib/application/control/run-mode.js'
@@ -573,4 +576,25 @@ test('reverse tunnel: an adb timeout is reported and ticks never overlap', async
   await started
   tunnel.stop()
   assert.match(tunnel.lastError, /超时/)
+})
+
+test('device: a wireless reconnect refreshes the serial and retries connect', async () => {
+  const { AndroidDevice } = await import(
+    '../lib/infrastructure/adb/android-device.js'
+  )
+  const dir = join(tmpdir(), `dqy-dev-${Date.now()}`)
+  let serial = 'old:5555'
+  const adb = {
+    listDevices: async () => (serial === 'new:5555' ? ['new:5555'] : []),
+    get currentSerial() {
+      return serial
+    },
+    setSerial(next) {
+      serial = next
+    },
+  }
+  const device = new AndroidDevice(adb, dir, () => 'new:5555')
+  await device.connect()
+  assert.equal(serial, 'new:5555')
+  rmSync(dir, { recursive: true, force: true })
 })

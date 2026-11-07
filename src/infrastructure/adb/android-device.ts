@@ -50,6 +50,13 @@ function encodeInput(text: string): string {
   return encodeAdbInputText(sanitizeShellText(text))
 }
 
+function looksLikeDeviceGone(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /offline|device not found|no devices|not found|unauthorized|closed/i.test(
+    message,
+  )
+}
+
 export class AndroidDevice implements UiDriverPort {
   readonly kind = 'adb'
   private cachedSize: Size | null = null
@@ -57,11 +64,24 @@ export class AndroidDevice implements UiDriverPort {
   constructor(
     private readonly adb: AdbClient,
     private readonly captureDir: string,
+    /** Re-resolve the serial after a wireless reconnect; returns '' when unknown. */
+    private readonly refreshSerial?: () => string,
   ) {
     mkdirSync(captureDir, { recursive: true })
   }
 
   async connect(): Promise<void> {
+    try {
+      await this.requireDevice()
+    } catch (err) {
+      if (!this.tryRefresh()) {
+        throw err
+      }
+      await this.requireDevice()
+    }
+  }
+
+  private async requireDevice(): Promise<void> {
     const devices = await this.adb.listDevices()
     if (devices.length === 0) {
       throw new DeviceError(
@@ -69,6 +89,17 @@ export class AndroidDevice implements UiDriverPort {
         'no android device found; connect the phone and enable USB debugging',
       )
     }
+  }
+
+  /** Refresh the serial once; false when there is nothing new to try. */
+  private tryRefresh(): boolean {
+    const next = this.refreshSerial?.() ?? ''
+    if (!next || next === this.adb.currentSerial) {
+      return false
+    }
+    this.adb.setSerial(next)
+    console.log(`[device] serial refreshed to ${next}`)
+    return true
   }
 
   async isConnected(): Promise<boolean> {
@@ -233,6 +264,19 @@ export class AndroidDevice implements UiDriverPort {
   }
 
   async observe(): Promise<Observation> {
+    // A wireless reconnect changes the serial mid-session; reading the screen
+    // is idempotent, so refresh once and retry instead of failing the tool.
+    try {
+      return await this.observeOnce()
+    } catch (err) {
+      if (!looksLikeDeviceGone(err) || !this.tryRefresh()) {
+        throw err
+      }
+      return await this.observeOnce()
+    }
+  }
+
+  private async observeOnce(): Promise<Observation> {
     const size = await this.screenSize()
     const foreground = await this.foregroundApp()
 

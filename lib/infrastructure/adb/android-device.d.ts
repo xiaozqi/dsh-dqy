@@ -4,10 +4,17 @@ import type { AdbClient } from './adb-client.js';
 export declare class AndroidDevice implements UiDriverPort {
     private readonly adb;
     private readonly captureDir;
+    /** Re-resolve the serial after a wireless reconnect; returns '' when unknown. */
+    private readonly refreshSerial?;
     readonly kind = "adb";
     private cachedSize;
-    constructor(adb: AdbClient, captureDir: string);
+    constructor(adb: AdbClient, captureDir: string, 
+    /** Re-resolve the serial after a wireless reconnect; returns '' when unknown. */
+    refreshSerial?: (() => string) | undefined);
     connect(): Promise<void>;
+    private requireDevice;
+    /** Refresh the serial once; false when there is nothing new to try. */
+    private tryRefresh;
     isConnected(): Promise<boolean>;
     screenSize(): Promise<Size>;
     foregroundApp(): Promise<string>;
@@ -19,6 +26,7 @@ export declare class AndroidDevice implements UiDriverPort {
     pressKey(key: 'back' | 'home' | 'recents' | 'enter'): Promise<void>;
     openApp(packageName: string): Promise<void>;
     observe(): Promise<Observation>;
+    private observeOnce;
     findText(text: string): Promise<Point | null>;
     findNodes(matcher: UiMatcher): Promise<UiNode[]>;
     tapControl(matcher: UiMatcher, _templateHint?: string): Promise<UiNode>;

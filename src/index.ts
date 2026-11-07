@@ -487,7 +487,9 @@ export function apply(ctx: Context, config: FishConfig): void {
   const adbPath = resolveAdbPath(config.adbPath)
   const serial = resolveSerialOrEmpty(adbPath, config.deviceSerial)
   const adb = new AdbClient(adbPath, serial || undefined)
-  const device = new AndroidDevice(adb, dataDir)
+  const device = new AndroidDevice(adb, dataDir, () =>
+    resolveSerialOrEmpty(adbPath, config.deviceSerial),
+  )
   const memory = new JsonMemory(resolve(dataDir, 'memory.json'))
   const llmApiKey =
     config.apiKey ||
