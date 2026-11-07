@@ -67,6 +67,8 @@ export interface ControlConfig {
     allowedPeers: string[];
     /** Owner's own chat accounts: tone only, never extra permission. */
     ownerPeers: string[];
+    /** Second factor for owner commands; empty disables them. */
+    ownerPassphrase: string;
     maxLength: number;
     blockUrl: boolean;
     recipeDir: string;

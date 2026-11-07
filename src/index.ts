@@ -45,6 +45,7 @@ import { HttpNotificationSource } from './infrastructure/notifications/http-noti
 import { QqNotificationWatcher } from './infrastructure/notifications/qq-notification-watcher.js'
 import { FlowLock } from './application/support/flow-lock.js'
 import { classifyQqPeer } from './application/apps/qq-peer-kind.js'
+import { parseOwnerCommand } from './application/apps/owner-command.js'
 import { ReverseTunnelKeepAlive } from './infrastructure/notifications/reverse-tunnel.js'
 import { AdbClient } from './infrastructure/adb/adb-client.js'
 import { AndroidDevice } from './infrastructure/adb/android-device.js'
@@ -213,6 +214,8 @@ export interface ControlConfig {
   allowedPeers: string[]
   /** Owner's own chat accounts: tone only, never extra permission. */
   ownerPeers: string[]
+  /** Second factor for owner commands; empty disables them. */
+  ownerPassphrase: string
   maxLength: number
   blockUrl: boolean
   recipeDir: string
@@ -422,6 +425,12 @@ const configSchema = z.object({
         .array(z.string())
         .default([])
         .description('主人本人的账号，格式 "包名:对方名"；只影响回复语气与身份认知，不放宽任何发送或策略限制。'),
+      // Second factor for owner commands: an account alone must not be enough
+      // to command her. Empty = owner commands disabled.
+      ownerPassphrase: z
+        .string()
+        .default('')
+        .description('主人口令：只有白名单里的主人账号并且消息里带这个口令，才会执行有限指令（状态/刷抖音）。空 = 关闭。'),
       maxLength: z.number().default(500),
       blockUrl: z.boolean().default(true),
       recipeDir: z.string().default(''),
@@ -942,6 +951,41 @@ export function apply(ctx: Context, config: FishConfig): void {
   }[] = []
   const QQ_QUEUE_LIMIT = 8
   const qqLog = createFileLogger(resolve(dataDir, 'qq-auto-reply.log'))
+  // Bounded owner command set. Everything here still goes through the same
+  // gates: the reply is a normal outbound message, and the only side-effecting
+  // command (feed) is checked by the policy first.
+  const runOwnerCommand = async (
+    command: NonNullable<ReturnType<typeof parseOwnerCommand>>,
+  ): Promise<string> => {
+    if (command.kind === 'status') {
+      const failures = (await memory.recent(80)).filter(record =>
+        (record.tags ?? []).includes('failed'),
+      ).length
+      return (
+        `QQ自动回复${config.control.enabled && config.control.qqAutoReply ? '开' : '关'}，` +
+        `队列${qqQueue.length}；抖音私信${config.control.enabled ? '开' : '关'}；` +
+        `最近失败${failures}条。`
+      )
+    }
+    if (command.kind === 'feed') {
+      const gate = runMode.decide({
+        app: douyin.packageName,
+        surface: 'device',
+      })
+      if (gate.verdict === 'block') {
+        return `刷抖音被拦：${gate.reasons.join('；') || '需要本机确认'}`
+      }
+      await deviceFlow.run(() =>
+        douyin.browseFeed({
+          videos: command.count,
+          watchMs: 5000,
+          likeProbability: 0,
+        }),
+      )
+      return `刷了${command.count}个抖音视频，没点赞。`
+    }
+    return '口令能用。目前支持：状态 / 刷抖音 N（N 最多 20）。'
+  }
   const runQqAutoReply = async (
     source: string,
     peer?: string,
@@ -972,6 +1016,21 @@ export function apply(ctx: Context, config: FishConfig): void {
         text: input.text,
       })
     try {
+      if (peer) {
+        const ownerKey = `${qq.packageName}:${peer}`
+        const ownerCommand = config.control.ownerPeers.includes(ownerKey)
+          ? parseOwnerCommand(
+              message?.text ?? '',
+              config.control.ownerPassphrase,
+            )
+          : null
+        if (ownerCommand) {
+          qqLog(`owner command: ${ownerCommand.kind} peer=${peer}`)
+          const answer = await runOwnerCommand(ownerCommand)
+          await deviceFlow.run(() => qq.sendTextToPeer(peer, answer))
+          return
+        }
+      }
       // The notification names the peer; opening that chat directly avoids the
       // unread-badge race (QQ clears the badge as soon as it is handled).
       if (peer) {

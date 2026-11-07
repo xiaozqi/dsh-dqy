@@ -77,6 +77,8 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
         text: string;
         when?: number;
     }): Promise<ConversationReply | null>;
+    /** Sends pre-composed text to one peer, verifying the destination first. */
+    sendTextToPeer(peer: string, text: string): Promise<boolean>;
     replyToUnread(options?: QqOptions): Promise<ConversationReply[]>;
     private enterPeerConversation;
     private focusChatInput;

@@ -819,3 +819,19 @@ test('chat surface: header must be in the top band, input in the bottom band', a
     null,
   )
 })
+
+test('owner command: passphrase gates the command set', async () => {
+  const { parseOwnerCommand } = await import(
+    '../lib/application/apps/owner-command.js'
+  )
+  const P = '\u547c\u53eb\u5927\u80a5\u9c7c'
+  assert.equal(parseOwnerCommand('plain text', P), null)
+  assert.equal(parseOwnerCommand(P, P).kind, 'status')
+  assert.equal(parseOwnerCommand(P + '\uFF0C\u72B6\u6001', P).kind, 'status')
+  const feed = parseOwnerCommand(P + ' \u5237\u6296\u97f3 3', P)
+  assert.equal(feed.kind, 'feed')
+  assert.equal(feed.count, 3)
+  const capped = parseOwnerCommand(P + ' \u5237\u6296\u97f3 99', P)
+  assert.equal(capped.count, 20)
+  assert.equal(parseOwnerCommand(P + ' \u4e71\u5199', P).kind, 'unknown')
+})

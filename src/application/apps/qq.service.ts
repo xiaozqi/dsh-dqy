@@ -676,6 +676,32 @@ export class QqService
     return { peer: name, incoming, reply, sent }
   }
 
+  /** Sends pre-composed text to one peer, verifying the destination first. */
+  async sendTextToPeer(peer: string, text: string): Promise<boolean> {
+    const name = peer.trim()
+    const body = text.trim()
+    if (!name || !body) {
+      throw new DeviceError(
+        'QQ_BAD_INPUT',
+        'peer and text must not be empty',
+      )
+    }
+    await this.driver.connect()
+    await ensureDeviceReady(this.driver)
+    if ((await this.driver.foregroundApp()) !== QQ_PACKAGE) {
+      await this.driver.openApp(QQ_PACKAGE)
+      await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
+      await ensureForeground(this.driver, QQ_PACKAGE)
+    }
+    if (!(await this.isPeerChatOpen(name))) {
+      await this.ensureConversationList()
+      await this.enterPeerConversation(name)
+    }
+    await this.assertPeerChat(name)
+    await sleep(400)
+    return this.sendReply(body)
+  }
+
   async replyToUnread(
     options: QqOptions = {},
   ): Promise<ConversationReply[]> {
