@@ -334,7 +334,10 @@ const configSchema = z.object({
         )
         .default(defaultJunkRules),
       semanticEnabled: z.boolean().default(false),
-      dedupeWindowMs: z.number().default(600000),
+      // Replays arrive within a few seconds; the old 10-minute default also
+      // swallowed a friend sending the same short message twice. Message-level
+      // idempotency in the reply paths now covers true replays.
+      dedupeWindowMs: z.number().default(3000),
     })
     .default({}),
   mirror: z
