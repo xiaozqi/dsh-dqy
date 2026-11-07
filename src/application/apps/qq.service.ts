@@ -622,6 +622,7 @@ export class QqService
       return { peer: name, incoming, reply, sent: false }
     }
 
+    mark('decided')
     mark('acting')
     let sent = false
     try {
