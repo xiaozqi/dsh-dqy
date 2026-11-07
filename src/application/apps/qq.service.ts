@@ -490,6 +490,69 @@ export class QqService
     }
   }
 
+  /**
+   * Reply to one named peer, driven by the notification that just arrived.
+   *
+   * Unread-badge scanning is unreliable in practice: QQ clears the badge as
+   * soon as the notification is handled, so a reply that arrives "now" has no
+   * row to find. The notification already carries the peer name, so open that
+   * conversation directly and answer the last inbound message.
+   */
+  async replyToPeer(
+    peer: string,
+    authorize: (input: { peer: string; text: string }) => PolicyDecision,
+  ): Promise<ConversationReply | null> {
+    const name = peer.trim()
+    if (!name) {
+      return null
+    }
+    await this.driver.connect()
+    await this.driver.openApp(QQ_PACKAGE)
+    await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
+    await ensureForeground(this.driver, QQ_PACKAGE)
+    await this.ensureConversationList()
+    await this.enterPeerConversation(name)
+    await sleep(1200)
+
+    const messages = await this.readMessages()
+    const incoming = messages.filter(message => !message.isSelf)
+    const last = incoming[incoming.length - 1]?.content ?? ''
+    const key = `qq-reply:${name}:${hashText(last)}`
+    if (this.messageState?.seen(key)) {
+      return null
+    }
+    this.messageState?.claim({
+      idempotencyKey: key,
+      app: QQ_PACKAGE,
+      conversationId: `qq:${name}`,
+      textHash: hashText(last),
+    })
+
+    const reply = await this.composeReply(name, incoming)
+    const decision = authorize({ peer: name, text: reply })
+    if (decision.verdict !== 'allow') {
+      await this.memory.remember({
+        kind: 'event',
+        content:
+          `QQ reply to ${name} ${decision.verdict}: ${reply} ` +
+          `(${decision.reasons.join('; ')})`,
+        tags: ['qq', decision.verdict, name],
+      })
+      return { peer: name, incoming, reply, sent: false }
+    }
+
+    const sent = await this.sendReply(reply)
+    await this.memory.remember({
+      kind: 'event',
+      content:
+        `QQ conversation with ${name}: ` +
+        `${incoming.map(m => m.content).join(' / ')} -> ` +
+        `${sent ? 'replied' : 'reply not confirmed'}: ${reply}`,
+      tags: ['qq', 'conversation', name],
+    })
+    return { peer: name, incoming, reply, sent }
+  }
+
   async replyToUnread(
     options: QqOptions = {},
   ): Promise<ConversationReply[]> {

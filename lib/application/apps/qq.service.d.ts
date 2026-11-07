@@ -57,6 +57,18 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
             text: string;
         }) => PolicyDecision;
     }): Promise<VoiceTextResult>;
+    /**
+     * Reply to one named peer, driven by the notification that just arrived.
+     *
+     * Unread-badge scanning is unreliable in practice: QQ clears the badge as
+     * soon as the notification is handled, so a reply that arrives "now" has no
+     * row to find. The notification already carries the peer name, so open that
+     * conversation directly and answer the last inbound message.
+     */
+    replyToPeer(peer: string, authorize: (input: {
+        peer: string;
+        text: string;
+    }) => PolicyDecision): Promise<ConversationReply | null>;
     replyToUnread(options?: QqOptions): Promise<ConversationReply[]>;
     private enterPeerConversation;
     private focusChatInput;

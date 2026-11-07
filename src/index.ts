@@ -89,6 +89,11 @@ import { DmWatchPipeline } from './application/control/dm-watch-pipeline.js'
 import { RecipeExecutor } from './application/recipes/recipe-executor.js'
 import { RecipeLoader } from './infrastructure/recipes/recipe-loader.js'
 import { RecipeDirectMessageSender } from './infrastructure/recipes/recipe-dm-sender.js'
+import {
+  DouyinDmSender,
+  DOUYIN_PACKAGE,
+} from './infrastructure/recipes/douyin-dm-sender.js'
+import type { DirectMessageSender } from './domain/ports/dm-sender.port.js'
 
 export const name = 'dqy'
 // `llm` is injected so `ctx.llm` is populated: without it detectHostLlm()
@@ -842,7 +847,19 @@ export function apply(ctx: Context, config: FishConfig): void {
   )
   const recipes = new RecipeLoader(recipeDir).loadAll()
   const recipeExecutor = new RecipeExecutor(serialDriver)
-  const dmSender = new RecipeDirectMessageSender(recipeExecutor, recipes)
+  const recipeSender = new RecipeDirectMessageSender(recipeExecutor, recipes)
+  const douyinDmSender = new DouyinDmSender(serialDriver)
+  const dmSender: DirectMessageSender = {
+    async send(input) {
+      // Douyin resumes into the DM chat when the notification fires, where the
+      // recipe's "tap 消息 → peer" navigation cannot work; use the direct UI
+      // sender instead. Other platforms keep the declarative recipe.
+      if (input.app === DOUYIN_PACKAGE) {
+        return douyinDmSender.send(input)
+      }
+      return recipeSender.send(input)
+    },
+  }
   const dmWatch = new DmWatchPipeline(
     messageState,
     runMode,
@@ -864,21 +881,53 @@ export function apply(ctx: Context, config: FishConfig): void {
   // phone's notification store. The poll is what makes it "real time": it does
   // not depend on the shade, the bridge APK, or which app is in the foreground.
   let qqReplyBusy = false
-  const runQqAutoReply = async (source: string): Promise<void> => {
+  const qqLog = createFileLogger(resolve(dataDir, 'qq-auto-reply.log'))
+  const runQqAutoReply = async (
+    source: string,
+    peer?: string,
+  ): Promise<void> => {
+    qqLog(`trigger source=${source} peer=${peer ?? '-'} busy=${qqReplyBusy}`)
     if (qqReplyBusy || !config.control.qqAutoReply) {
+      qqLog(
+        `skip: busy=${qqReplyBusy} qqAutoReply=${config.control.qqAutoReply}`,
+      )
       return
     }
     qqReplyBusy = true
+    const authorize = (input: { peer: string; text: string }) =>
+      runMode.decide({
+        app: qq.packageName,
+        surface: 'message',
+        peer: input.peer,
+        text: input.text,
+      })
     try {
+      // The notification names the peer; opening that chat directly avoids the
+      // unread-badge race (QQ clears the badge as soon as it is handled).
+      if (peer) {
+        const single = await qq
+          .replyToPeer(peer, authorize)
+          .catch(err => {
+            console.warn(
+              `[qq] replyToPeer(${peer}) failed:`,
+              (err as Error).message,
+            )
+            return null
+          })
+        if (single) {
+          qqLog(
+            `replyToPeer ok: peer=${single.peer} sent=${single.sent} text=${single.reply}`,
+          )
+          console.log(
+            `[qq] auto reply (${source}) to ${single.peer}: sent=${single.sent}`,
+          )
+          return
+        }
+        qqLog(`replyToPeer returned null (duplicate or empty) peer=${peer}`)
+      }
       const replies = await qq.replyToUnread({
         maxConversations: 1,
-        authorize: input =>
-          runMode.decide({
-            app: qq.packageName,
-            surface: 'message',
-            peer: input.peer,
-            text: input.text,
-          }),
+        authorize,
       })
       if (replies.length > 0) {
         console.log(
@@ -890,12 +939,14 @@ export function apply(ctx: Context, config: FishConfig): void {
       }
       // Nothing replied: record it, otherwise "why didn't she answer" is
       // indistinguishable from "the trigger never fired".
+      qqLog(`no reply produced; fallback unread scan found nothing (peer=${peer ?? '-'})`)
       await memory.remember({
         kind: 'event',
-        content: `QQ 自动回复触发（${source}），但会话列表里没有可回的未读行`,
+        content: `QQ 自动回复触发（${source}），但没有可回的未读行（peer=${peer ?? '-'}）`,
         tags: ['qq', 'auto-reply', 'no-unread'],
       })
     } catch (err) {
+      qqLog(`failed: ${(err as Error).message}`)
       console.warn(
         `[qq] auto reply (${source}) failed:`,
         (err as Error).message,
@@ -914,7 +965,7 @@ export function apply(ctx: Context, config: FishConfig): void {
     }
     // Let the notification shade settle before QQ is opened and read.
     setTimeout(() => {
-      void runQqAutoReply('notification')
+      void runQqAutoReply('notification', decision.event.title || undefined)
     }, 1500)
   })
 
@@ -925,7 +976,7 @@ export function apply(ctx: Context, config: FishConfig): void {
       readNotifications: () =>
         adb.run(['shell', 'dumpsys', 'notification', '--noredact'], 20000),
       onPing: ping => {
-        void runQqAutoReply(`watch:${ping.title || 'qq'}`)
+        void runQqAutoReply(`watch:${ping.title || 'qq'}`, ping.title || undefined)
       },
       intervalMs: qqWatchMs,
       packageName: qq.packageName,
