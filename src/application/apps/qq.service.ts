@@ -156,23 +156,7 @@ export class QqService
     try {
       await this.driver.connect()
       await openAndWait(this.driver, QQ_PACKAGE, { timeoutMs: 30000 })
-      // QQ resumes into the last opened chat, where the conversation list and
-      // its search entry are both absent — entering a peer then times out.
-      const onConversationList = async (): Promise<boolean> => {
-        const obs = await this.driver.observe()
-        return (
-          findNode(
-            obs.roots,
-            node => node.desc === '搜索' || node.text === '搜索',
-          ) !== null ||
-          findNode(obs.roots, node => /:id\/aua$/.test(node.resourceId)) !==
-            null
-        )
-      }
-      if (!(await onConversationList())) {
-        await this.driver.pressKey('back')
-        await sleep(800)
-      }
+      await this.ensureConversationList()
       await this.enterPeerConversation(peer)
       // The chat can change under us (incoming notification, another actor),
       // so never type into a screen that is not QQ.
@@ -522,6 +506,7 @@ export class QqService
     await this.driver.openApp(QQ_PACKAGE)
     await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
     await ensureForeground(this.driver, QQ_PACKAGE)
+    await this.ensureConversationList()
     await sleep(2000)
 
     const rows = await this.collectUnreadRows()
@@ -873,6 +858,36 @@ export class QqService
           SELECTORS.holdToTalk.test(node.desc),
       )
     }, { timeoutMs: 8000 })
+  }
+
+  /**
+   * QQ resumes into the last opened chat, where the conversation list and its
+   * search entry are both absent. Both send and reply need the list (reply
+   * needs the unread rows, send needs the search box), so back out once when
+   * neither marker is on screen. Without this a message arriving while a chat
+   * is open makes the reply loop report "no unread" — a false negative.
+   */
+  private async ensureConversationList(): Promise<void> {
+    const onList = async (): Promise<boolean> => {
+      const obs = await this.driver.observe()
+      return (
+        findNode(
+          obs.roots,
+          node => node.desc === '搜索' || node.text === '搜索',
+        ) !== null ||
+        findNode(obs.roots, node => /:id\/aua$/.test(node.resourceId)) !== null
+      )
+    }
+    if (await onList()) {
+      return
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.driver.pressKey('back')
+      await sleep(800)
+      if (await onList()) {
+        return
+      }
+    }
   }
 
   private async collectUnreadRows(): Promise<UiNode[]> {

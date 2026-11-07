@@ -66,6 +66,14 @@ export declare class QqService implements AppAdapter, MessageCapability, SocialC
     private openMomentEditor;
     private composeAndPublishMoment;
     private locateHoldButton;
+    /**
+     * QQ resumes into the last opened chat, where the conversation list and its
+     * search entry are both absent. Both send and reply need the list (reply
+     * needs the unread rows, send needs the search box), so back out once when
+     * neither marker is on screen. Without this a message arriving while a chat
+     * is open makes the reply loop report "no unread" — a false negative.
+     */
+    private ensureConversationList;
     private collectUnreadRows;
     private readMessages;
     private composeReply;
