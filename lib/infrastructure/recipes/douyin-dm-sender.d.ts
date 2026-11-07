@@ -17,5 +17,6 @@ export declare class DouyinDmSender implements DirectMessageSender {
     /** In the right conversation when the input bar is visible and the header names the peer. */
     private isPeerChat;
     private openPeerChat;
+    private findPeerRow;
     private typeAndSend;
 }

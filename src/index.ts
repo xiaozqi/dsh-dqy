@@ -44,6 +44,7 @@ import { LogcatNotificationSource } from './infrastructure/notifications/logcat-
 import { HttpNotificationSource } from './infrastructure/notifications/http-notification-source.js'
 import { QqNotificationWatcher } from './infrastructure/notifications/qq-notification-watcher.js'
 import { FlowLock } from './application/support/flow-lock.js'
+import { classifyQqPeer } from './application/apps/qq-peer-kind.js'
 import { ReverseTunnelKeepAlive } from './infrastructure/notifications/reverse-tunnel.js'
 import { AdbClient } from './infrastructure/adb/adb-client.js'
 import { AndroidDevice } from './infrastructure/adb/android-device.js'
@@ -76,7 +77,7 @@ import { RoutedVoice } from './infrastructure/voice/routed-voice.js'
 import { VolcTts } from './infrastructure/voice/volc-tts.js'
 import { registerCommands } from './interface/commands.js'
 import { PERSONA, registerPersona } from './interface/prompt.js'
-import { registerTools, type FishServices } from './interface/tools.js'
+import { registerTools, type FishServices, type ReplyHealth } from './interface/tools.js'
 import { FileStateStore } from './infrastructure/state/file-state-store.js'
 import { OutboundGuard, buildPeerSet } from './application/control/outbound-guard.js'
 import { GuardedAdapterRegistry, surfaceFor } from './application/control/guarded-adapters.js'
@@ -948,6 +949,18 @@ export function apply(ctx: Context, config: FishConfig): void {
       // The notification names the peer; opening that chat directly avoids the
       // unread-badge race (QQ clears the badge as soon as it is handled).
       if (peer) {
+        const kind = classifyQqPeer(peer, message?.text ?? '')
+        if (kind !== 'direct') {
+          // Groups and service accounts must not get an automatic reply: one
+          // would spam the group, the other never needs an answer.
+          qqLog(`skip ${kind} peer=${peer}`)
+          await memory.remember({
+            kind: 'event',
+            content: `QQ 自动回复跳过（${kind}）: ${peer}`,
+            tags: ['qq', 'auto-reply', 'skipped', kind],
+          })
+          return
+        }
         let single: Awaited<ReturnType<typeof qq.replyToPeer>> | null = null
         try {
           single = await deviceFlow.run(() =>
@@ -1242,6 +1255,50 @@ export function apply(ctx: Context, config: FishConfig): void {
     mirror: mirrorPanel,
     confirmations,
     toolTimeoutMs: config.toolTimeoutMs,
+    async replyHealth(): Promise<ReplyHealth> {
+      const dayAgo = Date.now() - 24 * 3600 * 1000
+      const recent = messageState
+        .list()
+        .filter(record => record.updatedAt >= dayAgo)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+      const lastOutcomes = recent
+        .filter(
+          record =>
+            record.app === qq.packageName ||
+            record.app === DOUYIN_PACKAGE,
+        )
+        .slice(0, 5)
+        .map(record => ({
+          app: record.app,
+          phase: record.phase,
+          at: new Date(record.updatedAt).toISOString(),
+          error: record.lastError ?? '',
+        }))
+      const failures = (await memory.recent(80))
+        .filter(record => (record.tags ?? []).includes('failed'))
+        .slice(-5)
+        .map(record => ({
+          at: record.createdAt,
+          content: record.content.slice(0, 160),
+        }))
+      return {
+        qq: {
+          enabled: config.control.enabled && config.control.qqAutoReply,
+          busy: qqReplyBusy,
+          queued: qqQueue.length,
+          queueLimit: QQ_QUEUE_LIMIT,
+          watchMs:
+            (config.control as { qqWatchMs?: number }).qqWatchMs ?? 5000,
+        },
+        douyin: {
+          enabled: config.control.enabled,
+          dryRun: config.control.dryRun,
+          dedupeWindowMs: config.notifications.dedupeWindowMs,
+          lastOutcomes,
+        },
+        recentFailures: failures,
+      }
+    },
     describePolicy: () => {
       const snapshot = runMode.snapshot()
       const pending = confirmations.list().length

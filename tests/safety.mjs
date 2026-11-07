@@ -771,3 +771,15 @@ test('dm pipeline: an unconfirmed send is not retried (no double message)', asyn
   assert.equal(outcome.result, 'blocked')
   assert.equal(deps.attempts(), 1)
 })
+
+test('qq peer kind: groups and service accounts are not auto-replied', async () => {
+  const { classifyQqPeer, stripPeerPrefix } = await import(
+    '../lib/application/apps/qq-peer-kind.js'
+  )
+  assert.equal(classifyQqPeer('家庭群(5)', '在吗'), 'group')
+  assert.equal(classifyQqPeer('腾讯新闻', '今日头条'), 'service')
+  assert.equal(classifyQqPeer('班长', '张三: 明天交作业'), 'group')
+  assert.equal(classifyQqPeer('班长', '明天交作业'), 'direct')
+  assert.equal(stripPeerPrefix('张三: 明天交作业'), '明天交作业')
+  assert.equal(stripPeerPrefix('明天交作业'), '明天交作业')
+})

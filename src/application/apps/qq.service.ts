@@ -41,6 +41,7 @@ import {
   tapSend,
 } from '../adapters/base-adapter.js'
 import { ensureDeviceReady } from '../support/device-ready.js'
+import { stripPeerPrefix } from './qq-peer-kind.js'
 import {
   centerOf,
   findNode,
@@ -559,14 +560,24 @@ export class QqService
     }
     await sleep(600)
 
+    // Recent history makes the reply fit the conversation; the notification is
+    // still the authoritative trigger, so it is appended when the screen has
+    // not caught up with it yet.
+    const history = await this.readMessages().catch(() => [])
+    const inboundHistory = history.filter(message => !message.isSelf)
     let incoming: ConversationMessage[]
     if (trigger) {
-      // The notification already carries the message text, so the screen read
-      // is unnecessary; it is also the most expensive step.
-      incoming = [{ sender: name, content: trigger, isSelf: false, time: '' }]
+      const cleaned = stripPeerPrefix(trigger)
+      const newest = inboundHistory[inboundHistory.length - 1]?.content
+      incoming =
+        newest === cleaned
+          ? inboundHistory.slice(-6)
+          : [
+              ...inboundHistory.slice(-5),
+              { sender: name, content: cleaned, isSelf: false, time: '' },
+            ]
     } else {
-      const messages = await this.readMessages()
-      incoming = messages.filter(message => !message.isSelf)
+      incoming = inboundHistory
     }
     if (incoming.length === 0) {
       return null

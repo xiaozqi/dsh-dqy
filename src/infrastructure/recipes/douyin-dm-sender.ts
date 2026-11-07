@@ -6,6 +6,7 @@ import type {
 import type { UiDriverPort } from '../../domain/ports/ui-driver.port.js'
 import { centerOf, findNode, sleep, waitFor } from '../../application/support/wait-for.js'
 import { ensureDeviceReady } from '../../application/support/device-ready.js'
+import type { UiNode } from '../../domain/types.js'
 
 export const DOUYIN_PACKAGE = 'com.ss.android.ugc.aweme'
 
@@ -91,7 +92,31 @@ export class DouyinDmSender implements DirectMessageSender {
       await sleep(1000)
     }
 
-    const row = await waitFor(
+    let row = await this.findPeerRow(peer)
+    if (!row) {
+      // The conversation may sit below the fold; scroll the list down a few
+      // times instead of failing the reply outright.
+      const size = await this.driver.screenSize()
+      const from = { x: Math.round(size.width / 2), y: Math.round(size.height * 0.75) }
+      const to = { x: Math.round(size.width / 2), y: Math.round(size.height * 0.35) }
+      for (let scroll = 0; scroll < 4 && !row; scroll++) {
+        await this.driver.swipe(from, to, 400)
+        await sleep(800)
+        row = await this.findPeerRow(peer)
+      }
+    }
+    if (!row) {
+      throw new DeviceError(
+        'DM_PEER_NOT_FOUND',
+        `cannot find a conversation named ${peer}`,
+      )
+    }
+    await this.driver.tap(centerOf(row))
+    await sleep(1500)
+  }
+
+  private async findPeerRow(peer: string): Promise<UiNode | null> {
+    return waitFor(
       async () => {
         const observation = await this.driver.observe()
         return findNode(
@@ -101,10 +126,8 @@ export class DouyinDmSender implements DirectMessageSender {
             (node.text || '').includes(peer),
         )
       },
-      { timeoutMs: 10000 },
-    )
-    await this.driver.tap(centerOf(row))
-    await sleep(1500)
+      { timeoutMs: 4000 },
+    ).catch(() => null)
   }
 
   private async typeAndSend(reply: string): Promise<void> {
@@ -146,17 +169,27 @@ export class DouyinDmSender implements DirectMessageSender {
       await this.driver.pressKey('enter')
     }
 
-    // Only report success when the text is visible in the conversation.
-    const probe = reply.slice(0, 10)
+    // Only report success when the text is visible in the conversation. Long
+    // replies are truncated inside the bubble, so the fallback proof is that
+    // the input box no longer holds the draft.
+    const probe = reply.slice(0, 8)
     const confirmed = await waitFor(
       async () => {
         const observation = await this.driver.observe()
-        return findNode(
+        const inBubble = findNode(
           observation.roots,
           node => (node.text || '').includes(probe),
         )
-          ? true
-          : null
+        if (inBubble) {
+          return true
+        }
+        const draftStillThere = findNode(
+          observation.roots,
+          node =>
+            (node.className || '').includes('EditText') &&
+            (node.text || '').includes(probe),
+        )
+        return draftStillThere ? null : true
       },
       { timeoutMs: 6000 },
     ).then(

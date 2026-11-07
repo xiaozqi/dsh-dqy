@@ -16,6 +16,30 @@ import type { RunModePort } from '../domain/ports/run-mode.port.js';
 import type { MessageStatePort } from '../domain/ports/message-state.port.js';
 import type { DmWatchPipeline } from '../application/control/dm-watch-pipeline.js';
 import type { MirrorPanelService } from '../application/mirror/mirror-panel.service.js';
+export interface ReplyHealth {
+    qq: {
+        enabled: boolean;
+        busy: boolean;
+        queued: number;
+        queueLimit: number;
+        watchMs: number;
+    };
+    douyin: {
+        enabled: boolean;
+        dryRun: boolean;
+        dedupeWindowMs: number;
+        lastOutcomes: {
+            app: string;
+            phase: string;
+            at: string;
+            error: string;
+        }[];
+    };
+    recentFailures: {
+        at: string;
+        content: string;
+    }[];
+}
 export interface FishServices {
     loop: AgentLoop;
     signin: SignInService;
@@ -40,5 +64,7 @@ export interface FishServices {
     toolTimeoutMs: number;
     /** One-screen, user-facing answer to "why is she not talking?". */
     describePolicy(): string;
+    /** Auto-reply health for QQ and Douyin, for one-glance diagnosis. */
+    replyHealth(): Promise<ReplyHealth>;
 }
 export declare function registerTools(ctx: Context, services: FishServices): void;
