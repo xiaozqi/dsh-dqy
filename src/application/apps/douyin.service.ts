@@ -355,29 +355,46 @@ export class DouyinService
         'forward target is required',
       )
     }
-    const observation = await this.driver.observe()
-    const share = findNode(
-      observation.roots,
-      node =>
-        SELECTORS.shareEntry.test(node.desc) ||
-        SELECTORS.shareEntry.test(node.resourceId),
-    )
-    if (!share) {
-      throw new DeviceError(
-        'DOUYIN_NO_SHARE',
-        'share button not found',
+    const findShareEntry = async (): Promise<UiNode | null> => {
+      const obs = await this.driver.observe()
+      return findNode(
+        obs.roots,
+        node =>
+          SELECTORS.shareEntry.test(node.desc) ||
+          SELECTORS.shareEntry.test(node.resourceId),
       )
     }
-    await this.driver.tap(centerOf(share))
-    const targetNode = await waitFor(async () => {
+    const findTarget = async (): Promise<UiNode | null> => {
       const panel = await this.driver.observe()
       return findNode(
         panel.roots,
-        node =>
-          node.text.includes(target) ||
-          node.desc.includes(target),
+        node => node.text.includes(target) || node.desc.includes(target),
       )
-    }, { timeoutMs: 10000 })
+    }
+    let share = await findShareEntry()
+    if (!share) {
+      throw new DeviceError('DOUYIN_NO_SHARE', 'share button not found')
+    }
+    await this.driver.tap(centerOf(share))
+    let targetNode = await waitFor(findTarget, { timeoutMs: 7000 }).then(
+      node => node,
+      () => null,
+    )
+    if (!targetNode) {
+      // The panel sometimes does not open (stale video, previous overlay).
+      // Close whatever is on screen and retry once from the share button.
+      await this.driver.pressKey('back')
+      await sleep(800)
+      share = await findShareEntry()
+      if (!share) {
+        throw new DeviceError(
+          'DOUYIN_NO_SHARE',
+          'share button not found on retry',
+        )
+      }
+      await this.driver.tap(centerOf(share))
+      targetNode = await waitFor(findTarget, { timeoutMs: 8000 })
+    }
     await this.driver.tap(centerOf(targetNode))
     // Douyin only selects the target on the first tap; a compose sheet with a
     // 发送 button appears and the share is not delivered until it is pressed.
