@@ -618,3 +618,32 @@ test('action parser: braces inside strings do not break the scan', () => {
     assert.equal(action.name, 'finish')
   })
 })
+
+test('qq watcher: parses the phone notification dump, ignoring other apps', async () => {
+  const { parseQqNotifications } = await import(
+    '../lib/infrastructure/notifications/qq-notification-watcher.js'
+  )
+  const dump = [
+    'NotificationRecord(0x1: pkg=android user=UserHandle{0} id=1 tag=null importance=2 key=0|android|1|null|1000',
+    '  android.title=String (来电和通知都会静音)',
+    '  android.text=String (勿扰)',
+    'NotificationRecord(0x2: pkg=com.tencent.mobileqq user=UserHandle{0} id=7 tag=null importance=2 key=0|com.tencent.mobileqq|7|null|10217',
+    '  android.title=String (张三)',
+    '  android.text=String (在吗，回我一下)',
+  ].join('\n')
+  const pings = parseQqNotifications(dump)
+  assert.equal(pings.length, 1)
+  assert.equal(pings[0].title, '张三')
+  assert.equal(pings[0].text, '在吗，回我一下')
+  assert.equal(pings[0].key, '0|com.tencent.mobileqq|7|null|10217')
+})
+
+test('qq watcher: a dump without QQ notifications yields nothing', async () => {
+  const { parseQqNotifications } = await import(
+    '../lib/infrastructure/notifications/qq-notification-watcher.js'
+  )
+  assert.deepEqual(
+    parseQqNotifications('NotificationRecord(0x1: pkg=android key=0|android|1|null|1000'),
+    [],
+  )
+})

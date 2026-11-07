@@ -42,6 +42,7 @@ import { AdapterError, DeviceError, PolicyBlockedError } from './domain/errors.j
 import type { CapabilityId } from './domain/adapter-types.js'
 import { LogcatNotificationSource } from './infrastructure/notifications/logcat-notification-source.js'
 import { HttpNotificationSource } from './infrastructure/notifications/http-notification-source.js'
+import { QqNotificationWatcher } from './infrastructure/notifications/qq-notification-watcher.js'
 import { ReverseTunnelKeepAlive } from './infrastructure/notifications/reverse-tunnel.js'
 import { AdbClient } from './infrastructure/adb/adb-client.js'
 import { AndroidDevice } from './infrastructure/adb/android-device.js'
@@ -858,61 +859,81 @@ export function apply(ctx: Context, config: FishConfig): void {
     }
   })
 
-  // ---- QQ auto reply: notification -> read unread -> reply (gated) ----
-  // The recipe pipeline above drives Douyin DMs; QQ had no event trigger at
-  // all, so "she replies to my friends" only worked when a tool was called by
-  // hand. Answer QQ the same way, through the one outbound gate.
+  // ---- QQ auto reply: any signal -> read unread -> reply (gated) ----
+  // Two triggers: the notification event pipeline, and a direct poll of the
+  // phone's notification store. The poll is what makes it "real time": it does
+  // not depend on the shade, the bridge APK, or which app is in the foreground.
   let qqReplyBusy = false
-  notifications.onEvent(decision => {
-    if (
-      decision.action !== 'allow' ||
-      !config.control.qqAutoReply ||
-      decision.event.app !== 'com.tencent.mobileqq' ||
-      qqReplyBusy
-    ) {
+  const runQqAutoReply = async (source: string): Promise<void> => {
+    if (qqReplyBusy || !config.control.qqAutoReply) {
       return
     }
     qqReplyBusy = true
+    try {
+      const replies = await qq.replyToUnread({
+        maxConversations: 1,
+        authorize: input =>
+          runMode.decide({
+            app: qq.packageName,
+            surface: 'message',
+            peer: input.peer,
+            text: input.text,
+          }),
+      })
+      if (replies.length > 0) {
+        console.log(
+          `[qq] auto reply (${source}): ${replies
+            .map(r => `${r.peer} sent=${r.sent}`)
+            .join(', ')}`,
+        )
+        return
+      }
+      // Nothing replied: record it, otherwise "why didn't she answer" is
+      // indistinguishable from "the trigger never fired".
+      await memory.remember({
+        kind: 'event',
+        content: `QQ 自动回复触发（${source}），但会话列表里没有可回的未读行`,
+        tags: ['qq', 'auto-reply', 'no-unread'],
+      })
+    } catch (err) {
+      console.warn(
+        `[qq] auto reply (${source}) failed:`,
+        (err as Error).message,
+      )
+    } finally {
+      qqReplyBusy = false
+    }
+  }
+
+  notifications.onEvent(decision => {
+    if (
+      decision.action !== 'allow' ||
+      decision.event.app !== 'com.tencent.mobileqq'
+    ) {
+      return
+    }
     // Let the notification shade settle before QQ is opened and read.
     setTimeout(() => {
-      void qq
-        .replyToUnread({
-          maxConversations: 1,
-          authorize: input =>
-            runMode.decide({
-              app: qq.packageName,
-              surface: 'message',
-              peer: input.peer,
-              text: input.text,
-            }),
-        })
-        .then(async replies => {
-          if (replies.length > 0) {
-            console.log(
-              `[qq] auto reply: ${replies
-                .map(r => `${r.peer} sent=${r.sent}`)
-                .join(', ')}`,
-            )
-            return
-          }
-          // Nothing replied: record it, otherwise "why didn't she answer" is
-          // indistinguishable from "the trigger never fired".
-          await memory.remember({
-            kind: 'event',
-            content:
-              'QQ 通知已触发自动回复，但会话列表里没有识别到可回的未读行' +
-              `(title=${decision.event.title || '-'})`,
-            tags: ['qq', 'auto-reply', 'no-unread'],
-          })
-        })
-        .catch(err =>
-          console.warn('[qq] auto reply failed:', (err as Error).message),
-        )
-        .finally(() => {
-          qqReplyBusy = false
-        })
+      void runQqAutoReply('notification')
     }, 1500)
   })
+
+  const qqWatchMs =
+    (config.control as { qqWatchMs?: number }).qqWatchMs ?? 5000
+  if (config.control.enabled && config.control.qqAutoReply && qqWatchMs > 0) {
+    const qqWatcher = new QqNotificationWatcher({
+      readNotifications: () =>
+        adb.run(['shell', 'dumpsys', 'notification', '--noredact'], 20000),
+      onPing: ping => {
+        void runQqAutoReply(`watch:${ping.title || 'qq'}`)
+      },
+      intervalMs: qqWatchMs,
+      packageName: qq.packageName,
+      logger: message => console.log('[qq-watch]', message),
+    })
+    qqWatcher.start()
+    ctx.effect(() => () => qqWatcher.stop())
+  }
 
   // Mirror panel subsystem: a file-backed config, a scrcpy process adapter and
   // the application service, exposed over the host web server together with an
