@@ -62,6 +62,8 @@ export interface SignInPlanConfig {
 export interface ControlConfig {
     enabled: boolean;
     dryRun: boolean;
+    /** Answer incoming QQ notifications without waiting for a tool call. */
+    qqAutoReply: boolean;
     allowedPeers: string[];
     maxLength: number;
     blockUrl: boolean;
