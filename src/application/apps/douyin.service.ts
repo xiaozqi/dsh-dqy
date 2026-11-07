@@ -355,6 +355,17 @@ export class DouyinService
         'forward target is required',
       )
     }
+    // A live room animates continuously, so UiAutomator can never dump it
+    // ("could not get idle state") and every screen read times out. Detect it
+    // from the activity name (dumpsys works without the UI tree) and step out.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const foreground = await this.driver.foregroundApp()
+      if (!/live/i.test(foreground)) {
+        break
+      }
+      await this.driver.pressKey('back')
+      await sleep(1500)
+    }
     const findShareEntry = async (): Promise<UiNode | null> => {
       const obs = await this.driver.observe()
       return findNode(
