@@ -27,13 +27,11 @@ function actionKey(input: {
   method: string
   args: Record<string, unknown>
 }): string {
-  let args = ''
-  try {
-    args = JSON.stringify(input.args)
-  } catch {
-    args = String(input.args)
-  }
-  return `${input.app}/${input.capability}/${input.method}:${args}`
+  // Keyed by the action, not by its arguments: the heartbeat asked to browse
+  // bilibili with count 3, 5 and 4 on three ticks and filled the inbox with
+  // the same decision three times. One pending entry per action is enough for
+  // the owner to judge, and approving it runs the arguments it was queued with.
+  return `${input.app}/${input.capability}/${input.method}`
 }
 
 /**
