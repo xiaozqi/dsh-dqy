@@ -32,6 +32,7 @@ const KEY_CODES: Record<string, number> = {
   home: 3,
   recents: 187,
   enter: 66,
+  wakeup: 224,
 }
 
 const ADB_KEYBOARD_IME = 'com.android.adbkeyboard/.AdbIME'
@@ -242,7 +243,7 @@ export class AndroidDevice implements UiDriverPort {
   }
 
   async pressKey(
-    key: 'back' | 'home' | 'recents' | 'enter',
+    key: 'back' | 'home' | 'recents' | 'enter' | 'wakeup',
   ): Promise<void> {
     const code = KEY_CODES[key]
     await this.adb.run(['shell', 'input', 'keyevent', String(code)])

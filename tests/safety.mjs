@@ -647,3 +647,127 @@ test('qq watcher: a dump without QQ notifications yields nothing', async () => {
     [],
   )
 })
+
+test('flow lock: a second flow never overlaps the first', async () => {
+  const { FlowLock } = await import('../lib/application/support/flow-lock.js')
+  const lock = new FlowLock()
+  const events = []
+  const first = lock.run(async () => {
+    events.push('a-start')
+    await new Promise(resolve => setTimeout(resolve, 60))
+    events.push('a-end')
+  })
+  const second = lock.run(async () => {
+    events.push('b-start')
+    events.push('b-end')
+  })
+  await Promise.all([first, second])
+  assert.deepEqual(events, ['a-start', 'a-end', 'b-start', 'b-end'])
+})
+
+function pipelineDeps(options = {}) {
+  const phases = []
+  const state = {
+    seen: () => false,
+    claim: () => {},
+    transition: (_key, phase) => phases.push(phase),
+    get: () => undefined,
+  }
+  const runMode = { gate: () => ({ verdict: 'allow', reasons: [] }) }
+  const llm = {
+    chat: options.chat ?? (async () => '{"shouldReply":true,"reply":"ok"}'),
+  }
+  let attempts = 0
+  const sender = {
+    send: async () => {
+      attempts += 1
+      const err = options.sendError ? options.sendError() : null
+      if (err) {
+        throw err
+      }
+    },
+  }
+  return { phases, state, runMode, llm, sender, attempts: () => attempts }
+}
+
+test('dm pipeline: invalid model output fails loudly instead of "no reply needed"', async () => {
+  const { DmWatchPipeline } = await import(
+    '../lib/application/control/dm-watch-pipeline.js'
+  )
+  const deps = pipelineDeps({ chat: async () => 'not json at all' })
+  const pipeline = new DmWatchPipeline(
+    deps.state,
+    deps.runMode,
+    deps.llm,
+    deps.sender,
+    { dedupeWindowMs: 3000 },
+  )
+  const outcome = await pipeline.handle({
+    app: 'com.tencent.mobileqq',
+    title: 'p',
+    text: 'hi',
+    when: Date.now(),
+  })
+  assert.equal(outcome.result, 'blocked')
+  assert.match(outcome.detail, /LLM_DECISION_INVALID/)
+  assert.equal(deps.attempts(), 0)
+  assert.ok(deps.phases.includes('failed'))
+  assert.ok(!deps.phases.includes('verified'))
+})
+
+test('dm pipeline: a transient send failure is retried once', async () => {
+  const { DmWatchPipeline } = await import(
+    '../lib/application/control/dm-watch-pipeline.js'
+  )
+  let first = true
+  const deps = pipelineDeps({
+    sendError: () => {
+      if (first) {
+        first = false
+        return new Error('UI not ready')
+      }
+      return null
+    },
+  })
+  const pipeline = new DmWatchPipeline(
+    deps.state,
+    deps.runMode,
+    deps.llm,
+    deps.sender,
+    { dedupeWindowMs: 3000 },
+  )
+  const outcome = await pipeline.handle({
+    app: 'com.ss.android.ugc.aweme',
+    title: 'p',
+    text: 'hi',
+    when: Date.now(),
+  })
+  assert.equal(outcome.result, 'sent')
+  assert.equal(deps.attempts(), 2)
+})
+
+test('dm pipeline: an unconfirmed send is not retried (no double message)', async () => {
+  const { DmWatchPipeline } = await import(
+    '../lib/application/control/dm-watch-pipeline.js'
+  )
+  const { DeviceError } = await import('../lib/domain/errors.js')
+  const deps = pipelineDeps({
+    sendError: () =>
+      new DeviceError('DM_SEND_UNCONFIRMED', 'bubble not visible'),
+  })
+  const pipeline = new DmWatchPipeline(
+    deps.state,
+    deps.runMode,
+    deps.llm,
+    deps.sender,
+    { dedupeWindowMs: 3000 },
+  )
+  const outcome = await pipeline.handle({
+    app: 'com.ss.android.ugc.aweme',
+    title: 'p',
+    text: 'hi',
+    when: Date.now(),
+  })
+  assert.equal(outcome.result, 'blocked')
+  assert.equal(deps.attempts(), 1)
+})

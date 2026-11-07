@@ -40,6 +40,7 @@ import {
   pushMedia,
   tapSend,
 } from '../adapters/base-adapter.js'
+import { ensureDeviceReady } from '../support/device-ready.js'
 import {
   centerOf,
   findNode,
@@ -541,6 +542,7 @@ export class QqService
     }
 
     await this.driver.connect()
+    await ensureDeviceReady(this.driver)
     // Opening QQ costs several seconds; if it is already in front (the usual
     // case right after a notification), skip it entirely.
     if ((await this.driver.foregroundApp()) !== QQ_PACKAGE) {
@@ -620,6 +622,7 @@ export class QqService
     }
     const maxConversations = options.maxConversations ?? 3
     await this.driver.connect()
+    await ensureDeviceReady(this.driver)
     await this.driver.openApp(QQ_PACKAGE)
     await waitForApp(this.driver, QQ_PACKAGE, { timeoutMs: 15000 })
     await ensureForeground(this.driver, QQ_PACKAGE)

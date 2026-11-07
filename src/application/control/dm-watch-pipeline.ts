@@ -1,11 +1,16 @@
 import { createHash } from 'node:crypto'
+import { DeviceError } from '../../domain/errors.js'
+import { sleep } from '../support/wait-for.js'
 import type {
   ChatMessage,
   LlmPort,
 } from '../../domain/ports/llm.port.js'
 import type { MessageStatePort } from '../../domain/ports/message-state.port.js'
 import type { RunModePort } from '../../domain/ports/run-mode.port.js'
-import type { DirectMessageSender } from '../../domain/ports/dm-sender.port.js'
+import type {
+  DirectMessageSendInput,
+  DirectMessageSender,
+} from '../../domain/ports/dm-sender.port.js'
 import type { NotificationEvent } from '../../domain/notification-types.js'
 import type { OutboundMessage } from '../../domain/control-types.js'
 
@@ -27,6 +32,8 @@ export interface DmWatchOutcome {
 }
 
 interface ReplyDecision {
+  /** false when the model output could not be parsed at all. */
+  ok: boolean
   shouldReply: boolean
   reply: string
 }
@@ -39,7 +46,7 @@ function parseReplyDecision(raw: string): ReplyDecision {
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start === -1 || end <= start) {
-    return { shouldReply: false, reply: '' }
+    return { ok: false, shouldReply: false, reply: '' }
   }
   try {
     const parsed = JSON.parse(raw.slice(start, end + 1)) as {
@@ -47,12 +54,14 @@ function parseReplyDecision(raw: string): ReplyDecision {
       reply?: unknown
     }
     const reply = typeof parsed.reply === 'string' ? parsed.reply.trim() : ''
-    return {
-      shouldReply: parsed.shouldReply === true && reply.length > 0,
-      reply,
+    // "shouldReply: true" with no text is as broken as invalid JSON; treating
+    // it as "no reply needed" would silently swallow the message.
+    if (parsed.shouldReply === true && reply.length === 0) {
+      return { ok: false, shouldReply: false, reply: '' }
     }
+    return { ok: true, shouldReply: parsed.shouldReply === true, reply }
   } catch {
-    return { shouldReply: false, reply: '' }
+    return { ok: false, shouldReply: false, reply: '' }
   }
 }
 
@@ -119,7 +128,7 @@ export class DmWatchPipeline {
         }
       }
 
-      await this.sender.send({
+      await this.sendWithRetry({
         app: event.app,
         peer,
         reply: decision.reply,
@@ -128,7 +137,12 @@ export class DmWatchPipeline {
       this.messageState.transition(key, 'verified')
       return { key, result: 'sent', detail: decision.reply }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail =
+        err instanceof DeviceError
+          ? `${err.code}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err)
       if (this.messageState.get(key)?.phase !== 'failed') {
         this.messageState.transition(key, 'failed', detail)
       }
@@ -136,10 +150,42 @@ export class DmWatchPipeline {
     }
   }
 
+  // A transient UI failure (app slow to open, list not settled) is worth one
+  // retry. A send that may already have gone out is not retried: repeating it
+  // would deliver the same reply twice.
+  private async sendWithRetry(input: DirectMessageSendInput): Promise<void> {
+    try {
+      await this.sender.send(input)
+    } catch (err) {
+      const maybeSent =
+        err instanceof DeviceError && err.code === 'DM_SEND_UNCONFIRMED'
+      if (maybeSent) {
+        throw err
+      }
+      await sleep(2000)
+      await this.sender.send(input)
+    }
+  }
+
   // The decision call is isolated: this context has no device tools, so text
   // from an untrusted sender can only produce a candidate reply, never an
   // action. The hard gate still re-checks that reply before any transmission.
   private async decideReply(event: NotificationEvent): Promise<ReplyDecision> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const decision = await this.askForReply(event)
+      if (decision.ok) {
+        return decision
+      }
+    }
+    // Never fall through as "no reply needed": that would mark a real message
+    // as handled and the owner would never learn it was skipped.
+    throw new DeviceError(
+      'LLM_DECISION_INVALID',
+      'reply decision was not valid JSON after two attempts',
+    )
+  }
+
+  private async askForReply(event: NotificationEvent): Promise<ReplyDecision> {
     const messages: ChatMessage[] = [
       { role: 'system', content: this.systemPrompt() },
       {

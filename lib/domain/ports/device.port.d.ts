@@ -9,7 +9,7 @@ export interface DevicePort {
     swipe(from: Point, to: Point, durationMs: number): Promise<void>;
     inputText(text: string): Promise<void>;
     inputChinese(text: string): Promise<void>;
-    pressKey(key: 'back' | 'home' | 'recents' | 'enter'): Promise<void>;
+    pressKey(key: 'back' | 'home' | 'recents' | 'enter' | 'wakeup'): Promise<void>;
     openApp(packageName: string): Promise<void>;
     observe(): Promise<Observation>;
     findText(text: string): Promise<Point | null>;

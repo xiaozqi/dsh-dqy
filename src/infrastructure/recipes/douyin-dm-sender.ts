@@ -5,6 +5,7 @@ import type {
 } from '../../domain/ports/dm-sender.port.js'
 import type { UiDriverPort } from '../../domain/ports/ui-driver.port.js'
 import { centerOf, findNode, sleep, waitFor } from '../../application/support/wait-for.js'
+import { ensureDeviceReady } from '../../application/support/device-ready.js'
 
 export const DOUYIN_PACKAGE = 'com.ss.android.ugc.aweme'
 
@@ -37,6 +38,7 @@ export class DouyinDmSender implements DirectMessageSender {
     }
 
     await this.driver.connect()
+    await ensureDeviceReady(this.driver)
     await this.driver.openApp(DOUYIN_PACKAGE)
     await waitFor(
       async () =>

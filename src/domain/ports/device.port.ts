@@ -14,7 +14,7 @@ export interface DevicePort {
   // through a dedicated input method (ADBKeyBoard broadcast) and MUST restore
   // the user's previous IME afterwards.
   inputChinese(text: string): Promise<void>
-  pressKey(key: 'back' | 'home' | 'recents' | 'enter'): Promise<void>
+  pressKey(key: 'back' | 'home' | 'recents' | 'enter' | 'wakeup'): Promise<void>
   openApp(packageName: string): Promise<void>
   observe(): Promise<Observation>
   findText(text: string): Promise<Point | null>

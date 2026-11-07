@@ -20,6 +20,8 @@ export declare class DmWatchPipeline {
     private readonly config;
     constructor(messageState: MessageStatePort, runMode: RunModePort, llm: LlmPort, sender: DirectMessageSender, config: DmWatchConfig);
     handle(event: NotificationEvent): Promise<DmWatchOutcome>;
+    private sendWithRetry;
     private decideReply;
+    private askForReply;
     private systemPrompt;
 }
